@@ -1,0 +1,10 @@
+name = "cyclic"
+version = "0.1.0"
+defaultTargets = ["cyclic"]
+
+[[lean_lib]]
+name = "Cyclic"
+
+[[lean_exe]]
+name = "cyclic"
+root = "Main"
