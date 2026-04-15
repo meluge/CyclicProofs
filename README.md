@@ -73,6 +73,9 @@ cyclic_def loopDef : Nat → Nat → Nat
 | `Cyclic/Measure.lean` | Lex- and sum-measure synthesis; `Measure` ADT; `synthMeasure`. |
 | `Cyclic/Syntax.lean` | The `cyclic_def` command: value-returning syntax parsers, measure-to-syntax emitter, enforcement via `throwErrorAt` when SCT fails. |
 | `Cyclic/Example.lean` | Driving demos: `swapAdd` (hand + extracted), Ackermann, multi-SCT closure tests, `cyclic_def` uses, a `#guard_msgs`-asserted failing case. |
+| `Cyclic/ProofTree.lean` | `SubjectTerm` / `Formula` / two-sided `Sequent` / `ProofTree`; `extractTraceSCGs` with per-occurrence, per-arg flattened traces. |
+| `Cyclic/Unravel.lean` | `Cyclic.Unravel.translate` — emits a Lean tactic-script theorem from a validated `ProofTree` (toy `Nat`-induction shape). |
+| `Cyclic/ProofExample.lean` | `∀ x : Nat, P(x)` proof tree, hand + extracted trace graph, a negative example, and the unravelled `myP_all` theorem. |
 | `Main.lean` | Tiny executable printing `swapAdd 3 5` and the SCT check result. |
 
 ## Extractor semantics
@@ -125,14 +128,63 @@ pointed error. Not every SCT-valid function is covered by these two
 schemas (e.g. mutual recursion or more elaborate measures), which is
 where measure synthesis will need to grow.
 
-## Where this leaves the cyclic-proof goal
+## Cyclic proofs (stages 1–3)
 
-Everything so far is the *termination* half of cyclic proofs — enough to
-make Lean accept recursive **functions** whose termination is witnessed
-by an SCT derivation. The step toward actual cyclic **proofs** (the
-paper's subject) is still ahead: a data type for proof trees with
-back-edges, an SCT-style trace condition on those back-edges, and a
-translator that unfolds them into ordinary inductive Lean proofs.
+On top of the termination substrate, the same SCT kernel now drives the
+proof side: a data type for cyclic proof trees, automatic trace
+extraction per back-edge, and an end-to-end unravelling of a validated
+tree into an ordinary Lean theorem.
+
+### Proof trees (`Cyclic/ProofTree.lean`)
+
+- `SubjectTerm`, `Formula`, two-sided `Sequent` (`Γ ⊢ Δ`).
+- `ProofTree` constructors: `leaf`, `identity`, `node` (generic rule,
+  covers unfold), `caseSplit` (binds the variable being split so trace
+  extraction sees the induced substitution), `back` (to an ancestor
+  under a substitution).
+
+### Trace extraction
+
+`extractTraceSCGs` walks a tree accumulating a path-substitution from
+every `caseSplit` and emits one `SCGraph` per back-edge. Vertices are
+`(side, formula-occurrence, arg-position)` flattened to a single
+index; edges are emitted only between **matched occurrences** (same
+side, same position, same predicate, same arity), with descent labels
+determined by structural subterm comparison of A's args under
+`σ_path` against B's args. Unfolds don't need a dedicated constructor
+— the unfolded form is already carried in the child node's sequent,
+so endpoint comparison sees intervening unfolds implicitly.
+
+The multi-graph SCT kernel (`SCGraph.checkMultiSCT`) is reused
+unchanged to accept/reject the resulting graph set.
+
+### Unravelling (`Cyclic/Unravel.lean`)
+
+`Cyclic.Unravel.translate leanPred thmName t` emits a Lean 4 theorem
+(as a `String`) that proves the sequent by well-founded induction on
+the case-split variable. For the toy `∀ x : Nat, P(x)` derivation in
+`Cyclic/ProofExample.lean`, the emitted script is pasted verbatim as
+the proof of `myP_all` — if the translator drifts the paste stops
+matching and the build fails, giving a mechanical end-to-end check.
+
+Supported shape today: root `caseSplit` on one `Nat` variable, cases
+closing as `leaf` (emit `simp [leanPred]`) or as a `back` (bare or
+inside a `node`) to the root (emit `simp [leanPred]; exact ih`). Any
+other shape emits a `sorry`-stub so the output still parses.
+
+### Known generality gaps (vs. Grotenhuis & Otten)
+
+- Rules that reindex occurrences (weakening, contraction, exchange,
+  cut) break position-based occurrence matching.
+- No rule-designated principal formula or trace-progress annotation;
+  progress is inferred from structural subterm descent.
+- No inductive-predicate productions (unfold is modelled only by the
+  child sequent's explicit form).
+- No cross-predicate traces — matched occurrences must share a
+  predicate name.
+- `identity` is currently a rubber stamp (no `Γ ∩ Δ ≠ ∅` check).
+- Unravelling is specialised to single-arg single-predicate sequents
+  with a `Nat` induction variable.
 
 ## Building
 
