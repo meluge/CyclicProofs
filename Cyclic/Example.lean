@@ -207,6 +207,15 @@ command to do both at once. It emits:
   2. a `#eval` that prints the SCGs extracted from the user's equations
 -/
 
+-- Without `cyclic_def`, Lean's auto-termination fails on the swapped call:
+--
+--   def swapAddFail : Nat → Nat → Nat
+--     | 0, x₁        => x₁
+--     | .succ x₀', x₁ => .succ (swapAddFail x₁ x₀')
+--
+-- gives "failed to infer structural recursion … Could not find a decreasing
+-- measure". The sum-of-args measure (a₀ + a₁) works, and `cyclic_def` finds
+-- it automatically.
 cyclic_def swapAdd2 : Nat → Nat → Nat
   | 0, y        => y
   | .succ x', y => .succ (swapAdd2 y x')

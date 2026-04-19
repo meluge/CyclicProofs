@@ -140,11 +140,20 @@ abbrev Subst := List (String × SubjectTerm)
 /-! ### Proof trees -/
 
 /-- A cyclic proof tree. Each node carries a label so back-edges can
-    reference ancestors by name. -/
+    reference ancestors by name.
+
+    `.leaf` and `.back` carry an optional `closeTactic` — the literal
+    Lean tactic the unraveller should emit to close the goal. When `none`,
+    the unraveller uses sensible defaults (`simp [<pred>]` for leaves,
+    `simp [<pred>]; exact ih_<…>` for back-edges). When `some s`, the
+    unraveller emits `s` verbatim — letting the user override with e.g.
+    `congr; exact ih_n` for non-trivial inductive proofs where the IH
+    applies to a sub-position of the goal. -/
 inductive ProofTree where
   /-- A generic leaf: the sequent is closed by some external justification
       (informational string). Trace through a leaf is nil. -/
   | leaf (label : String) (seq : Sequent) (justification : String)
+         (closeTactic : Option String := none)
   /-- The identity axiom `Γ, φ ⊢ φ, Δ`. No children, no continuation. -/
   | identity (label : String) (seq : Sequent)
   /-- An inner node: application of a named rule to children subtrees.
@@ -164,31 +173,32 @@ inductive ProofTree where
   /-- A back-edge: the current sequent is an instance of the ancestor's
       sequent under `σ` (which instantiates the ancestor's free variables). -/
   | back (label : String) (seq : Sequent) (ancestor : String) (σ : Subst)
+         (closeTactic : Option String := none)
   deriving Inhabited
 
 namespace ProofTree
 
 def label : ProofTree → String
-  | .leaf lbl _ _ => lbl
+  | .leaf lbl _ _ _ => lbl
   | .identity lbl _ => lbl
   | .node lbl _ _ _ => lbl
   | .caseSplit lbl _ _ _ => lbl
-  | .back lbl _ _ _ => lbl
+  | .back lbl _ _ _ _ => lbl
 
 def sequent : ProofTree → Sequent
-  | .leaf _ s _ => s
+  | .leaf _ s _ _ => s
   | .identity _ s => s
   | .node _ s _ _ => s
   | .caseSplit _ s _ _ => s
-  | .back _ s _ _ => s
+  | .back _ s _ _ _ => s
 
 /-- Collect every `(backLabel, ancestorLabel)` pair in the tree. -/
 partial def backEdges : ProofTree → List (String × String)
-  | .leaf _ _ _ => []
+  | .leaf _ _ _ _ => []
   | .identity _ _ => []
   | .node _ _ _ cs => cs.flatMap backEdges
   | .caseSplit _ _ _ cases => cases.flatMap fun (_, t) => backEdges t
-  | .back lbl _ anc _ => [(lbl, anc)]
+  | .back lbl _ anc _ _ => [(lbl, anc)]
 
 end ProofTree
 
@@ -272,7 +282,7 @@ def buildTraceGraph (aSeq bSeq : Sequent) (pathSubst : Subst) : SCGraph :=
 partial def extractTraceSCGsAux
     (ancestors : List (String × Sequent × Subst)) :
     ProofTree → List SCGraph
-  | .leaf _ _ _ => []
+  | .leaf _ _ _ _ => []
   | .identity _ _ => []
   | .node lbl seq _ children =>
     let ancestors' := (lbl, seq, []) :: ancestors
@@ -283,7 +293,7 @@ partial def extractTraceSCGsAux
       -- Extend every ancestor's path substitution with `var ↦ pat`.
       let extended := ancestors'.map fun (l, s, σ) => (l, s, (var, pat) :: σ)
       extractTraceSCGsAux extended sub
-  | .back _ bSeq anc _ =>
+  | .back _ bSeq anc _ _ =>
     match ancestors.find? (fun (l, _, _) => l == anc) with
     | none => []  -- dangling back-edge; ignore
     | some (_, aSeq, pathSubst) =>

@@ -1,195 +1,187 @@
 # cyclic
 
-A Lean 4 experiment in translating cyclic proofs into induction, following
-Grotenhuis & Otten, *Unravelling Abstract Cyclic Proofs into Proofs by
-Induction* (2026). The current work formalises the **termination substrate**
-underneath that translation: size-change graphs, the multi-graph SCT
-closure check, syntactic extraction from pattern-matching equations, and a
-`cyclic_def` command that verifies termination and synthesises a Lean
-`termination_by` measure automatically.
+A Lean 4 implementation of Grotenhuis & Otten's translation from cyclic
+proofs to proofs by well-founded induction (*Unravelling Abstract Cyclic
+Proofs into Proofs by Induction*, 2026; PDF in repo root). Two user-facing
+commands:
 
-## What works today
+- **`cyclic_def`** — pattern-matching recursive definitions whose
+  termination is justified by the size-change principle. The macro
+  validates SCT, synthesises a `termination_by` measure, and emits a
+  plain Lean `def`.
+- **`cyclic_thm`** — cyclic proofs of inductive theorems. Three surface
+  forms (legacy explicit-tree, predicate + `by_cyclic` DSL, inline-goal
+  + `by_cyclic` DSL). The macro validates SCT, builds a measure, and
+  emits a regular `theorem` proven by (possibly nested) induction.
 
-### Pipeline
+Both commands are sound because the kernel re-checks every emitted
+declaration — the unraveller's correctness isn't formally proved, but
+its output type-checks or it doesn't.
 
-```
-  equations (as AST)
-        │
-        ▼  extractAllSCGs
-  [size-change graphs]
-        │
-        ▼  checkMultiSCT
-     pass / fail   ──► (fail: reject definition)
-        │
-        ▼  synthMeasure
-  lex / sum / fail ──► (fail: reject definition)
-        │
-        ▼  emit
-  def … termination_by …
-```
-
-### `cyclic_def` command
-
-Lets the user write a pattern-matching recursive definition in natural
-Lean syntax. At elaboration time the macro:
-
-1. Parses each equation into the `Equation` AST.
-2. Extracts a size-change graph per recursive call.
-3. Runs the multi-graph SCT check (composition-closure; every idempotent
-   must have a strict self-loop).
-4. Synthesises a termination measure — lex on a parameter permutation,
-   else sum-of-args. Fails the command if neither works.
-5. Emits a plain `def … termination_by …` and logs the chosen measure.
-
-Demo definitions in `Cyclic/Example.lean`:
+## Quick taste
 
 ```lean
-cyclic_def swapAdd2 : Nat → Nat → Nat          -- synthesises: a₀ + a₁
-  | 0, y        => y
-  | .succ x', y => .succ (swapAdd2 y x')
-
-cyclic_def ack2 : Nat → Nat → Nat              -- synthesises: (a₀, a₁)
+-- Cyclic recursive def: size-change termination, lex measure synthesised
+cyclic_def ack2 : Nat → Nat → Nat
   | 0, y             => .succ y
   | .succ x, 0       => ack2 x (.succ .zero)
   | .succ x, .succ y => ack2 x (ack2 (.succ x) y)
+-- info: [cyclic_def ack2] multi-SCT PASS; measure = lex (a0, a1)
+
+-- Cyclic theorem in inline-goal DSL form: write the goal directly
+cyclic_thm myAddR0 (n : Nat) : myAdd n 0 = n by_cyclic
+  cases n with
+    | 0       => done by simp [myAdd]
+    | succ n' => back {n := n'} by
+        simp [myAdd]
+        exact ih_n
+-- emits a real theorem; #check @myAddR0 → ∀ (n : Nat), myAdd n 0 = n
 ```
 
-A non-terminating swap is rejected at elaboration:
+## Pipeline
+
+```
+  user surface (def equations | proof tree | by_cyclic DSL)
+        │
+        ▼  (parse / walk into ProofTree or Equation list)
+  abstract data
+        │
+        ▼  extractAllSCGs / extractTraceSCGs
+  [size-change graphs]
+        │
+        ▼  checkMultiSCT       ──► reject if no termination certificate
+        │
+        ▼  synthMeasure         (diagnostic for cyclic_thm; required for cyclic_def)
+  measure (lex / sum / none)
+        │
+        ▼  Unravel.translate / cyclic_def emit
+  Lean script (def + termination_by | theorem ... := by ...)
+        │
+        ▼  elabCommand
+  kernel-checked declaration
+```
+
+## `cyclic_thm` surface forms
 
 ```lean
-cyclic_def loopDef : Nat → Nat → Nat
-  | x, y => loopDef y x
--- error: multi-SCT check FAILED
---   SCGraph(2 → 2): [0 -≥→ 1, 1 -≥→ 0]
---   Some idempotent in the composition-closure has no strict self-loop …
+-- Form 1 (legacy): explicit ProofTree value
+cyclic_thm myL_all : myL := lProof
+
+-- Form 2: predicate + DSL
+cyclic_thm myL_all : myL xs by_cyclic
+  cases xs with
+    | []         => done
+    | cons x xs' => back {xs := xs'}
+
+-- Form 3: inline goal + DSL — reads like a normal Lean theorem
+cyclic_thm myAddR0 (n : Nat) : myAdd n 0 = n by_cyclic
+  cases n with
+    | 0       => done by simp [myAdd]
+    | succ n' => back {n := n'} by
+        simp [myAdd]
+        exact ih_n
 ```
+
+### `by_cyclic` DSL grammar
+
+A *step* is one of:
+
+| step | meaning |
+| --- | --- |
+| `done`                                 | leaf, default close `simp [<pred>]` (or bare `simp` for inline-goal form) |
+| `done by <tactic>`                     | leaf with user-supplied close tactic |
+| `back [<label>] [{var := term, …}]`    | back-edge to ancestor case-split (label defaults to nearest enclosing) |
+| `back … by <tactic>`                   | back-edge with user-supplied close tactic |
+| `cases <var> with \| <pat> => <step> …`| case-split on `<var>` with arms |
+| `<label>: <step>`                      | attach a user label to the step (for back-edges to reach across nested cases) |
+
+Patterns: `[]`, numeric literals, `x :: xs`, and generic `<ctor> <var> …`
+applications. Constructors are introspected from the binder type's
+inductive declaration in the Lean environment, so `Nat`, `List α`, and
+user-defined inductives (any single-recursive constructor) work without
+registration.
+
+The *substitution* `{var := term, …}` is non-iterating: `{y := Nat.succ y}`
+applies once and the inner `y` refers to the current scope (no
+infinite-rewrite issues).
+
+## Worked examples
+
+| File | Theorem | What it shows |
+| --- | --- | --- |
+| `Cyclic/ProofExample.lean`  | `∀ x : Nat, myP x` | smallest non-trivial cyclic proof; explicit-tree form |
+| `Cyclic/ProofExample2.lean` | `∀ x y : Nat, myQ x y` | back-edge re-binds non-induction var |
+| `Cyclic/ProofExample3.lean` | `∀ x y : Nat, myB x y` | lex descent, multiple ancestors, nested case-splits |
+| `Cyclic/ProofExample4.lean` | `∀ xs : List Nat, myL xs` | non-Nat inductive type via auto-introspection |
+| `Cyclic/ProofExample5.lean` | DSL versions of all the above + `worker_terminates` | termination of a state-machine model |
+| `Cyclic/ProofExample6.lean` | `∀ s : Stack, myS s` | user-defined inductive (`Stack`); also notes the multi-recursive limit |
+| `Cyclic/ProofExample7.lean` | `myAdd n 0 = n` and `myAdd 0 n = n` | inline-goal form proving real (not propositionally trivial) inductive theorems |
 
 ## Module layout
 
 | File | Purpose |
 | --- | --- |
-| `Cyclic/SizeChange.lean` | `SCGraph`, composition, canonicalisation, `checkMultiSCT` (closure + idempotent check), single-graph `checkSCT` for comparison. |
-| `Cyclic/Extract.lean` | `Pattern` / `Term` / `Equation` AST; structural comparison of callee args against caller patterns; `extractAllSCGs`. |
-| `Cyclic/Measure.lean` | Lex- and sum-measure synthesis; `Measure` ADT; `synthMeasure`. |
-| `Cyclic/Syntax.lean` | The `cyclic_def` command: value-returning syntax parsers, measure-to-syntax emitter, enforcement via `throwErrorAt` when SCT fails. |
-| `Cyclic/Example.lean` | Driving demos: `swapAdd` (hand + extracted), Ackermann, multi-SCT closure tests, `cyclic_def` uses, a `#guard_msgs`-asserted failing case. |
-| `Cyclic/ProofTree.lean` | `SubjectTerm` / `Formula` / two-sided `Sequent` / `ProofTree`; `extractTraceSCGs` with per-occurrence, per-arg flattened traces. |
-| `Cyclic/Unravel.lean` | `Cyclic.Unravel.translate` — emits a Lean tactic-script theorem from a validated `ProofTree` (toy `Nat`-induction shape). |
-| `Cyclic/ProofExample.lean` | `∀ x : Nat, P(x)` proof tree, hand + extracted trace graph, a negative example, and the unravelled `myP_all` theorem. |
-| `Main.lean` | Tiny executable printing `swapAdd 3 5` and the SCT check result. |
+| `Cyclic/SizeChange.lean` | `SCGraph`, composition, canonicalisation, `checkMultiSCT`. |
+| `Cyclic/Extract.lean` | `Pattern` / `Term` / `Equation` AST; `extractAllSCGs`. |
+| `Cyclic/Measure.lean` | Lex- and sum-measure synthesis; `synthMeasure`. |
+| `Cyclic/Syntax.lean` | The `cyclic_def` command (recursive defs with auto-termination). |
+| `Cyclic/ProofTree.lean` | `SubjectTerm` / `Formula` / two-sided `Sequent` / `ProofTree`; per-occurrence trace extraction (`extractTraceSCGs`). |
+| `Cyclic/Unravel.lean` | `translate` — emit a Lean tactic-script theorem from a validated `ProofTree`, parametric over the goal type and the default-simp predicate. |
+| `Cyclic/ThmCmd.lean` | The `cyclic_thm` command (legacy form 1) + the shared `runCyclicThmCore` backend used by all forms. |
+| `Cyclic/Tactic.lean` | The `by_cyclic` DSL: syntax, walker (DSL → `ProofTree`), and elab rules for forms 2 and 3. |
+| `Cyclic/Example.lean` | `cyclic_def` demos: `swapAdd`, `ack2`, a non-terminating swap rejected at elaboration. |
+| `Cyclic/ProofExample{,2..7}.lean` | `cyclic_thm` demos. |
+| `Main.lean` | Tiny executable. |
 
-## Extractor semantics
+## Trace extraction (proofs side)
 
-For each recursive call `f(a₀, …, a_{m-1})` in an equation with caller
-patterns `(p₀, …, p_{n-1})`, edge `i →^ℓ j` is produced when:
+For each back-edge `B → A`:
+1. Walk the path from the root, accumulating a *path substitution*
+   `σ_path` from every enclosing `caseSplit`.
+2. At the back-edge, instantiate the ancestor's sequent under `σ_path`
+   and compare it occurrence-by-occurrence, arg-by-arg, to the
+   back-edge's sequent.
+3. Emit one `SCGraph` per back-edge with vertices indexed by
+   `(side, formula-occurrence, arg-position)` flattened to a single
+   integer. Edges encode descent (≥ if structurally equal, > if strict
+   subterm).
 
-| condition on `aⱼ` and `pᵢ` | label `ℓ` |
-| --- | --- |
-| `aⱼ` is structurally equal to `pᵢ` (variables by name) | ≥ |
-| `aⱼ` is a strict subterm of `pᵢ` | > |
-| otherwise | no edge |
+Multi-graph SCT is exactly the kernel from `cyclic_def` — same
+`checkMultiSCT` for the function and the proof side.
 
-This is slightly stronger than "callee arg must be a bare variable":
-`ack(suc x, y') → ack(suc x, …)` correctly emits `(0 ≥ 0)` because
-`suc x` structurally matches the caller pattern at position 0.
+## Pretty-print / introspection
 
-## Multi-graph SCT
+`cyclic_thm` introspects the predicate's signature (or each binder's
+type for the inline-goal form) via `forallTelescope` + `Lean.Environment`
+lookup, then walks each inductive's constructor list to discover names
+and recursive-arg positions. No per-type registration: any inductive
+already in the environment works as long as each constructor has at
+most one recursive argument.
 
-Implemented in `Cyclic/SizeChange.lean`:
+## Honest limitations
 
-- `SCGraph.canon` — dedup edges on `(src,tgt)`, joining labels (strict
-  wins) so graphs compare up to order/multiplicity.
-- `SCGraph.equiv` — structural equality of canonical graphs.
-- `SCGraph.comp` — composition (edge-chaining with label join).
-- `SCGraph.closure` — smallest superset closed under pairwise
-  composition, deduped by `equiv`; terminates because there are only
-  finitely many canonical graphs on a fixed arity.
-- `SCGraph.isIdempotent` — `g ∘ g ≡ g`.
-- `SCGraph.checkMultiSCT` — every idempotent in the closure has a
-  strict self-loop.
+- **Multi-recursive constructors** (`Tree.node l r`, two recursive
+  args) fall back to a `sorry` stub — the translator doesn't yet bind
+  multiple IHs (`ih_l`, `ih_r`) per arm. Phase 4.
+- **Cross-predicate / mutual** back-edges aren't supported.
+- **Sequent rules that reindex occurrences** (weakening, contraction,
+  exchange, cut) break position-based occurrence matching.
+- **`identity`** is currently `assumption` — no real `Γ ∩ Δ ≠ ∅`
+  check.
+- **Inline-goal form** uses bare `simp` as the default close tactic
+  (no predicate to unfold automatically); user supplies specifics
+  via `by simp [myAdd, …]` etc.
+- **Pattern syntax** in the DSL is restricted: `[]`, `<num>`,
+  `x :: xs`, and `<ctor> <var> …`. No nested patterns.
 
-## Measure synthesis
-
-Implemented in `Cyclic/Measure.lean`. Two schemas are tried on the
-**original** graphs (not the closure — Lean needs the measure to decrease
-on every call, not just over cycles):
-
-1. **Lex**: find a permutation `π` of parameter indices such that for
-   every graph `G` there is a position `j` where `G` has a strict
-   self-loop at `π(j)`, with nonstrict self-loops at every earlier
-   position. Emits `(a_{π(0)}, …, a_{π(k-1)})` as a nested pair,
-   handled by Lean's default lex well-founded order on products.
-2. **Sum**: every graph admits a bijection between callee args and
-   caller params where every covering edge is ≥ and at least one is
-   strict. Emits `a₀ + a₁ + …`.
-
-If neither schema succeeds the `cyclic_def` command fails with a
-pointed error. Not every SCT-valid function is covered by these two
-schemas (e.g. mutual recursion or more elaborate measures), which is
-where measure synthesis will need to grow.
-
-## Cyclic proofs (stages 1–3)
-
-On top of the termination substrate, the same SCT kernel now drives the
-proof side: a data type for cyclic proof trees, automatic trace
-extraction per back-edge, and an end-to-end unravelling of a validated
-tree into an ordinary Lean theorem.
-
-### Proof trees (`Cyclic/ProofTree.lean`)
-
-- `SubjectTerm`, `Formula`, two-sided `Sequent` (`Γ ⊢ Δ`).
-- `ProofTree` constructors: `leaf`, `identity`, `node` (generic rule,
-  covers unfold), `caseSplit` (binds the variable being split so trace
-  extraction sees the induced substitution), `back` (to an ancestor
-  under a substitution).
-
-### Trace extraction
-
-`extractTraceSCGs` walks a tree accumulating a path-substitution from
-every `caseSplit` and emits one `SCGraph` per back-edge. Vertices are
-`(side, formula-occurrence, arg-position)` flattened to a single
-index; edges are emitted only between **matched occurrences** (same
-side, same position, same predicate, same arity), with descent labels
-determined by structural subterm comparison of A's args under
-`σ_path` against B's args. Unfolds don't need a dedicated constructor
-— the unfolded form is already carried in the child node's sequent,
-so endpoint comparison sees intervening unfolds implicitly.
-
-The multi-graph SCT kernel (`SCGraph.checkMultiSCT`) is reused
-unchanged to accept/reject the resulting graph set.
-
-### Unravelling (`Cyclic/Unravel.lean`)
-
-`Cyclic.Unravel.translate leanPred thmName t` emits a Lean 4 theorem
-(as a `String`) that proves the sequent by well-founded induction on
-the case-split variable. For the toy `∀ x : Nat, P(x)` derivation in
-`Cyclic/ProofExample.lean`, the emitted script is pasted verbatim as
-the proof of `myP_all` — if the translator drifts the paste stops
-matching and the build fails, giving a mechanical end-to-end check.
-
-Supported shape today: root `caseSplit` on one `Nat` variable, cases
-closing as `leaf` (emit `simp [leanPred]`) or as a `back` (bare or
-inside a `node`) to the root (emit `simp [leanPred]; exact ih`). Any
-other shape emits a `sorry`-stub so the output still parses.
-
-### Known generality gaps (vs. Grotenhuis & Otten)
-
-- Rules that reindex occurrences (weakening, contraction, exchange,
-  cut) break position-based occurrence matching.
-- No rule-designated principal formula or trace-progress annotation;
-  progress is inferred from structural subterm descent.
-- No inductive-predicate productions (unfold is modelled only by the
-  child sequent's explicit form).
-- No cross-predicate traces — matched occurrences must share a
-  predicate name.
-- `identity` is currently a rubber stamp (no `Γ ∩ Δ ≠ ∅` check).
-- Unravelling is specialised to single-arg single-predicate sequents
-  with a `Nat` induction variable.
+The unraveller itself is **not** formally verified. Soundness comes
+from Lean's kernel re-checking every emitted theorem; the worst case
+of an unraveller bug is a broken build, not an unsound theorem.
 
 ## Building
 
 ```
-lake build           # builds the library + example evals + the Main executable
+lake build           # library + #eval demos + Main executable
 lake exe cyclic      # runs Main.lean
 ```
 

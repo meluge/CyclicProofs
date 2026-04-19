@@ -1,6 +1,7 @@
 import Cyclic.ProofTree
 import Cyclic.SizeChange
 import Cyclic.Unravel
+import Cyclic.ThmCmd
 
 /-!
 # Stage-1 cyclic-proof example
@@ -113,12 +114,16 @@ def myP : Nat → Prop
   | 0       => True
   | .succ x => myP x
 
-#eval IO.println (Cyclic.Unravel.translate "myP" "myP_all" pProof)
+cyclic_thm myP_all : myP := pProof
 
-theorem myP_all (x : Nat) : myP x := by
-  induction x with
-  | zero =>
-    simp [myP]
-  | succ x' ih =>
-    simp [myP]
-    exact ih
+/-! ### Using the generated theorem like any other Lean theorem -/
+
+-- Direct application at a concrete argument.
+example : myP 7 := myP_all 7
+
+-- As a hypothesis in a larger proof.
+example (n : Nat) : myP n ∧ myP (n + 1) :=
+  ⟨myP_all n, myP_all (n + 1)⟩
+
+-- Check the elaborated type.
+#check @myP_all        -- myP_all : ∀ (x : Nat), myP x

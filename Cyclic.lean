@@ -7,4 +7,12 @@ import Cyclic.Syntax
 import Cyclic.Example
 import Cyclic.ProofTree
 import Cyclic.Unravel
+import Cyclic.ThmCmd
+import Cyclic.Tactic
 import Cyclic.ProofExample
+import Cyclic.ProofExample2
+import Cyclic.ProofExample3
+import Cyclic.ProofExample4
+import Cyclic.ProofExample5
+import Cyclic.ProofExample6
+import Cyclic.ProofExample7
