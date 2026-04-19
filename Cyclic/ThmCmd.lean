@@ -144,19 +144,27 @@ def runCyclicThmCore
         ++ "': multi-SCT check FAILED.\nExtracted graphs:\n"
         ++ String.intercalate "\n" lines
         ++ "\nNo SCT-based measure exists for this derivation.")
-  -- Step 2: synthesize a measure (diagnostic).
+  -- Step 2: synthesize a measure. This now drives emission, not just
+  -- diagnostics — `translateWF` plumbs it into a `termination_by` clause
+  -- so the cyclic proof's soundness travels with the emitted def.
   let rootArity : Nat :=
     let ns := proofTree.sequent.antecedents.map (·.args.length) ++
               proofTree.sequent.succedents.map (·.args.length)
     ns.foldl (· + ·) 0
+  let measureOpt := synthMeasure graphs rootArity
   let measureStr :=
-    match synthMeasure graphs rootArity with
+    match measureOpt with
     | some m => toString m
     | none   => "(none — SCT closure passes but no lex/sum measure)"
-  -- Step 3: emit and elaborate.
+  -- Compute closure witnesses too: makes the SCT soundness witness
+  -- (which positions strictly decrease in each idempotent of the closure)
+  -- visible to the user, regardless of which schema the synthesizer
+  -- ended up using.
+  let witnessStr := witnessesToString graphs rootArity
+  -- Step 3: emit (paper-style well-founded recursion) and elaborate.
   let thmName := toString nameStx.getId
-  let script := Cyclic.Unravel.translate defaultSimpPred goalType thmName
-                  varSorts proofTree
+  let script := Cyclic.Unravel.translateWF defaultSimpPred goalType thmName
+                  varSorts measureOpt proofTree
   let env ← getEnv
   match Lean.Parser.runParserCategory env `command script with
   | .error msg =>
@@ -167,7 +175,8 @@ def runCyclicThmCore
     elabCommand cmdStx
     logInfoAt nameStx
       ("[cyclic_thm " ++ thmName ++ "] multi-SCT PASS; measure = "
-        ++ measureStr ++ "\nemitted:\n" ++ script)
+        ++ measureStr ++ "\nclosure witnesses:\n" ++ witnessStr
+        ++ "\nemitted:\n" ++ script)
 
 /-- Convenience for the predicate form: introspects the predicate
     signature from the environment, then dispatches to `runCyclicThmCore`. -/

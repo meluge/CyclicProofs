@@ -62,6 +62,18 @@ syntax (name := cycCases)
 syntax (name := cycLabel)
   ident ":" cyclic_step : cyclic_step
 
+/-- One branch of a `branch` step: a `·` followed by a sub-step. -/
+syntax cyclicBranch := "·" cyclic_step
+
+/-- `branch · s₁ · s₂ … · sₙ` — split the current goal into n subgoals
+    via `refine ⟨?_, ?_, …⟩` and prove each with a sub-step. Used to
+    express cyclic proofs over multi-recursive constructors (e.g.
+    `BinTree.node l r` with one back-edge per subtree). Each branch's
+    SCT contribution is computed independently, so descent is enforced
+    per recursive subterm. -/
+syntax (name := cycBranch)
+  "branch" withPosition((colGe cyclicBranch)+) : cyclic_step
+
 namespace Cyclic.Tactic
 
 open Lean Elab Command Cyclic.Proof
@@ -154,6 +166,7 @@ partial def walkStep
     (ancStack : List AncEntry)         -- innermost first
     (forcedLabel : Option String)
     (stx : TSyntax `cyclic_step)
+    (autoWrap : Bool := true)          -- wrap `.back` in `.node "unfold"` to emit `simp [pred]` prefix
     : StateRefT Nat CommandElabM Cyclic.Proof.ProofTree := do
   let getLabel (pfx : String) : StateRefT Nat CommandElabM String :=
     match forcedLabel with
@@ -161,7 +174,7 @@ partial def walkStep
     | none   => fresh pfx
   match stx with
   | `(cyclic_step| $userLbl:ident : $sub:cyclic_step) =>
-    walkStep predName currentArgs ancStack (some userLbl.getId.toString) sub
+    walkStep predName currentArgs ancStack (some userLbl.getId.toString) sub autoWrap
   | `(cyclic_step| done $[by $tac]?) =>
     let lbl ← getLabel "_L"
     let tacStr := tac.bind (·.raw.reprint)
@@ -202,13 +215,13 @@ partial def walkStep
     let tacStr := tac.bind (·.raw.reprint)
     let backNode : Cyclic.Proof.ProofTree :=
       .back backLbl (mkSequent predName bArgs) ancLabel σ tacStr
-    -- When the user didn't supply `by tac`, wrap the back-edge in an
-    -- `.node "unfold"` so the translator emits `simp [<pred>]` before
-    -- the `exact ih …`. With a custom close tactic, the user takes full
-    -- control — emit the bare `.back` so we don't double-emit simp.
-    match tacStr with
-    | some _ => return backNode
-    | none =>
+    -- When `autoWrap`, wrap the back-edge in a `.node "unfold"` so the
+    -- translator emits `simp [<pred>]` before the `exact ih …`. Skipped
+    -- when (a) the user supplied a custom close tactic (full control),
+    -- or (b) we're inside a `branch` whose prelude already unfolded.
+    if tacStr.isSome || !autoWrap then
+      return backNode
+    else
       let nodeLbl ← fresh "_U"
       return .node nodeLbl (mkSequent predName currentArgs) "unfold" [backNode]
   | `(cyclic_step| cases $varId:ident with $arms:cyclicArm*) =>
@@ -221,10 +234,21 @@ partial def walkStep
         let patSubj ← patToSubject pat
         let σPat : Subst := [(varName, patSubj)]
         let argsAfterCase := currentArgs.map (SubjectTerm.subst σPat)
-        let subTree ← walkStep predName argsAfterCase (myEntry :: ancStack) none body
+        let subTree ← walkStep predName argsAfterCase (myEntry :: ancStack) none body autoWrap
         return (patSubj, subTree)
       | _ => throwError "malformed arm"
     return .caseSplit lbl (mkSequent predName currentArgs) varName armList
+  | `(cyclic_step| branch $branches:cyclicBranch*) =>
+    let lbl ← getLabel "_N"
+    -- Walk children with autoWrap=false: the branch's own emitted
+    -- prelude (`simp [pred]; refine ⟨…⟩`) already unfolded the goal,
+    -- so wrapping each back-edge in another `simp` would double-simp.
+    let children ← branches.toList.mapM fun (b : TSyntax `cyclicBranch) => do
+      match b with
+      | `(cyclicBranch| · $sub:cyclic_step) =>
+        walkStep predName currentArgs ancStack none sub false
+      | _ => throwError "malformed branch"
+    return .node lbl (mkSequent predName currentArgs) "branch" children
   | _ =>
     throwError "unrecognized cyclic step: {stx}"
 
@@ -240,6 +264,23 @@ def getPredArgNames (predName : Name) : Lean.MetaM (List String) := do
       return decl.userName.toString
 
 end Cyclic.Tactic
+
+/-! ### `recurse` — semantic primitive for back-edge IH application
+
+The cyclic-proof DSL hides the unravelled-form's `ih_<…>` binding name
+from the user. Inside a back-edge's `by` clause, the user writes
+`recurse` to mean "apply the IH that this back-edge corresponds to".
+The translator substitutes the literal token `recurse` for the
+auto-derived `exact ih_<…>` before elaboration, so the user never
+references the unravelled form's variable names.
+
+This `recurse` declaration exists only to make Lean's tactic parser
+accept the token in the `by` clause; it should never actually be
+elaborated (the translator's textual substitution removes it first).
+If you see the error below at run-time, the substitution didn't fire
+— something is wrong with the back-edge's translator path. -/
+elab "recurse" : tactic => do
+  Lean.throwError "the `recurse` keyword is for use inside a `by` clause of a `back` step in `by_cyclic`; it should be substituted by the cyclic-proof translator before elaboration"
 
 /-! ### Surface forms 2 & 3 — `by_cyclic` DSL
 

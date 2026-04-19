@@ -50,7 +50,7 @@ cyclic_thm myAddR0 (n : Nat) : myAdd n 0 = n by_cyclic
     | 0       => done by simp [myAdd]
     | succ n' => back {n := n'} by
         simp [myAdd]
-        exact ih_n
+        recurse
 
 /-! ### Verify it's a real theorem -/
 

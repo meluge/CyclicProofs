@@ -106,15 +106,18 @@ def sequentVars (s : Sequent) : List String :=
 For a SubjectTerm pattern like `.ctor "succ" [.var "x'"]`, look up the
 constructor in the case-split var's sort and produce:
 
-  * the case header string (e.g. `"succ x'"`),
-  * `some <recVarName>` if the constructor has exactly one recursive arg
-    (so a single IH gets bound), `none` otherwise.
+  * the case header string (e.g. `"succ x'"` for non-recursive ctors,
+    `"succ x' ih_x'"` for single-rec, `"node l r ih_l ih_r"` for
+    multi-rec),
+  * the list of `(recArgVar, ihName)` pairs the case binds.
 
-Multi-recursive constructors return `none` and force a fallback to a
-`sorry` stub — handling them is Phase 4 work.
+Each recursive constructor arg generates one IH, named after the
+subterm variable: `ih_<recArgVarName>`. So for `cases t with | node l r => …`,
+we bind `ih_l : P l` and `ih_r : P r`. Back-edges select the correct
+IH based on which subterm `σ` targets.
 -/
 def patToInductionCase (sortInfo : SortInfo) (pat : SubjectTerm)
-    : Option (String × Option String) :=
+    : Option (String × List (String × String)) :=
   match pat with
   | .ctor name patArgs =>
     match sortInfo.ctors.find? (·.shortName == name) with
@@ -126,23 +129,38 @@ def patToInductionCase (sortInfo : SortInfo) (pat : SubjectTerm)
         | _      => none
       if argVars.length != patArgs.length || argVars.length != ci.totalArgs then none
       else
+        -- Build (recArgVar, ihName) for each recursive constructor arg.
+        let ihEntries : List (String × String) :=
+          ci.recArgs.filterMap fun i =>
+            argVars[i]?.map fun v => (v, "ih_" ++ v)
         let argsStr :=
           if argVars.isEmpty then ""
           else " " ++ String.intercalate " " argVars
-        let header := ci.shortName ++ argsStr
-        match ci.recArgs with
-        | []   => some (header, none)
-        | [i]  => some (header, argVars[i]?)
-        | _    => none  -- multi-recursive: defer
+        let ihStr :=
+          if ihEntries.isEmpty then ""
+          else " " ++ String.intercalate " " (ihEntries.map (·.2))
+        let header := ci.shortName ++ argsStr ++ ihStr
+        some (header, ihEntries)
   | _ => none
 
 /-! ### IH context
 
-Each in-scope induction hypothesis. `genVars` lists the vars the IH was
-generalised over, in order — back-edges supply σ-images for them. -/
+Each in-scope case-split's induction hypotheses. A multi-recursive
+constructor (e.g. `Tree.node l r`) binds two IHs (`ih_l`, `ih_r`); a
+single-recursive constructor (e.g. `Nat.succ x'`) binds one (`ih_x'`).
+A back-edge picks the right IH by looking at `σ`'s image of the
+case-split's induction variable and matching it against the recursive
+subterm vars. -/
 structure IHInfo where
+  /-- Label of the case-split this IH set comes from. -/
   anc : String
-  ihName : String
+  /-- The variable the case-split inducts on (e.g. `t` for `cases t with`).
+      Back-edges look up `σ(caseSplitVar)` to pick which IH to apply. -/
+  caseSplitVar : String
+  /-- One entry per recursive subterm var: (subtermVarName, ihBindingName). -/
+  ihs : List (String × String)
+  /-- The vars the IH was generalised over, in order — back-edges supply
+      σ-images for them. -/
   genVars : List String
   deriving Inhabited
 
@@ -160,20 +178,40 @@ def reindent (depth : Nat) (s : String) : String :=
   let nonEmpty := lines.filter (· != "")
   String.intercalate ("\n" ++ pad depth) nonEmpty
 
-/-- Build the `ih_? args…` expression for a back-edge. -/
+/-- Build the `ih_? args…` expression for a back-edge. Selects the right
+    IH from the multi-IH set bound at the ancestor case-split, by looking
+    at `σ`'s image of the case-split's induction variable. -/
 def ihCall (sorts : List SortInfo) (ctx : List IHInfo) (anc : String) (σ : Subst)
     : String :=
   match ctx.find? (fun info => info.anc == anc) with
   | none =>
     "sorry /- no IH for ancestor '" ++ anc ++ "' in scope -/"
   | some info =>
-    if info.genVars.isEmpty then info.ihName
-    else
-      let args := info.genVars.map fun v =>
-        match σ.lookup v with
-        | some t => termToLean sorts t
-        | none   => v
-      info.ihName ++ " " ++ String.intercalate " " args
+    -- Pick the IH whose recursive-subterm var matches `σ(caseSplitVar)`.
+    -- For single-recursive case-splits this is the only option; for
+    -- multi-recursive, we route to the matching subtree's IH.
+    let chosenIh : Option String :=
+      match σ.lookup info.caseSplitVar with
+      | some (.var v) =>
+        info.ihs.find? (·.1 == v) |>.map (·.2)
+      | _ =>
+        -- Fall back to the lone IH if there's only one (handles
+        -- back-edges that don't explicitly specify a subterm but the
+        -- case-split is single-recursive).
+        if info.ihs.length == 1 then info.ihs.head?.map (·.2)
+        else none
+    match chosenIh with
+    | none =>
+      "sorry /- no matching IH at ancestor '" ++ anc
+        ++ "' for σ on '" ++ info.caseSplitVar ++ "' -/"
+    | some ihName =>
+      if info.genVars.isEmpty then ihName
+      else
+        let args := info.genVars.map fun v =>
+          match σ.lookup v with
+          | some t => termToLean sorts t
+          | none   => v
+        ihName ++ " " ++ String.intercalate " " args
 
 /-! ### Recursive translator
 
@@ -208,15 +246,41 @@ partial def translateTree (defaultSimpPred : Option String) (sorts : List SortIn
   | .identity _ _ =>
     pad depth ++ "assumption"
   | .back _ _ anc σ closeTac =>
-    -- Default just applies the IH at σ-arguments. Callers needing an
-    -- unfold step (the typical case) wrap the back-edge in a `.node`
-    -- whose translation prepends `simp [<pred>]`. Custom `closeTac`
-    -- overrides the default, giving full control for non-trivial
-    -- inductive steps where the IH applies to a sub-position.
-    let body := closeTac.getD ("exact " ++ ihCall sorts ctx anc σ)
+    -- Default just applies the IH at σ-arguments — the user never has
+    -- to know the auto-derived `ih_<…>` binding name. Callers needing
+    -- an unfold step wrap the back-edge in a `.node` whose translation
+    -- prepends `simp [<pred>]`.
+    --
+    -- A custom `closeTac` lets the user prepare the goal before the
+    -- back-edge fires. The token `recurse` inside the user's tactic is
+    -- substituted by `exact ih_<auto-derived>` — so the user can write
+    -- e.g. `simp [myAdd]; congr 1; recurse` without ever naming the IH
+    -- (preserving the cyclic-proof feel where back-edges, not IHs, are
+    -- the primitive).
+    let ihExact := "exact " ++ ihCall sorts ctx anc σ
+    let body := match closeTac with
+      | none     => ihExact
+      | some tac => tac.replace "recurse" ihExact
     pad depth ++ reindent depth body
   | .node _ _ _ [] =>
     pad depth ++ defaultSimp defaultSimpPred
+  | .node _ _ "branch" children =>
+    -- Multi-branch node: unfold the predicate, split the goal into N
+    -- subgoals via `refine ⟨?_, …, ?_⟩`, then prove each subgoal with
+    -- the corresponding child sub-proof. Produced by the DSL's `branch`
+    -- step for cyclic proofs over multi-recursive constructors. Each
+    -- child is emitted as `· <body>` with the bullet on its own line and
+    -- the body indented one level deeper, so Lean's layout rules accept it
+    -- regardless of how complex the body is.
+    let n := children.length
+    let placeholders := String.intercalate ", " (List.replicate n "?_")
+    let prelude :=
+      pad depth ++ defaultSimp defaultSimpPred ++ "\n"
+        ++ pad depth ++ "refine ⟨" ++ placeholders ++ "⟩"
+    let bodies := children.map fun child =>
+      let inner := translateTree defaultSimpPred sorts (depth + 1) ctx ambient varSorts child
+      pad depth ++ "·\n" ++ inner
+    prelude ++ "\n" ++ String.intercalate "\n" bodies
   | .node _ _ _ [child] =>
     pad depth ++ defaultSimp defaultSimpPred ++ "\n"
       ++ translateTree defaultSimpPred sorts depth ctx ambient varSorts child
@@ -229,9 +293,7 @@ partial def translateCaseSplit (defaultSimpPred : Option String) (sorts : List S
     (depth : Nat) (ctx : List IHInfo) (ambient : List String)
     (varSorts : List (String × SortInfo)) (lbl var : String)
     (cases : List (SubjectTerm × ProofTree)) : String :=
-  let ihName := "ih_" ++ var
   let genVars := ambient.filter (· != var)
-  let info : IHInfo := { anc := lbl, ihName := ihName, genVars := genVars }
   let ambient' := genVars
   let genClause :=
     if genVars.isEmpty then ""
@@ -243,16 +305,23 @@ partial def translateCaseSplit (defaultSimpPred : Option String) (sorts : List S
     | some sortInfo =>
       match patToInductionCase sortInfo patT with
       | none => none
-      | some (header, recArgVar?) =>
-        let hasIh := recArgVar?.isSome
-        let ihSuffix := if hasIh then " " ++ ihName else ""
-        let ctxForArm := if hasIh then info :: ctx else ctx
-        let varSorts' :=
-          match recArgVar? with
-          | some v => (v, sortInfo) :: varSorts
-          | none   => varSorts
+      | some (header, ihEntries) =>
+        -- IH entries are bound iff the constructor has at least one
+        -- recursive arg. The arm's IH context inherits the parent ctx
+        -- plus this case-split's IHInfo (with multi-IH list).
+        let ctxForArm :=
+          if ihEntries.isEmpty then ctx
+          else
+            let info : IHInfo :=
+              { anc := lbl
+                caseSplitVar := var
+                ihs := ihEntries
+                genVars := genVars }
+            info :: ctx
+        -- All recursive subterm vars get the parent's sort info.
+        let varSorts' := ihEntries.foldl (fun acc (v, _) => (v, sortInfo) :: acc) varSorts
         let body := translateTree defaultSimpPred sorts (depth + 1) ctxForArm ambient' varSorts' sub
-        some (pad depth ++ "| " ++ header ++ ihSuffix ++ " =>\n" ++ body)
+        some (pad depth ++ "| " ++ header ++ " =>\n" ++ body)
   pad depth ++ "induction " ++ var ++ genClause ++ " with\n"
     ++ String.intercalate "\n" arms
 
@@ -287,6 +356,150 @@ def translate (defaultSimpPred : Option String) (goalType thmName : String)
                     ++ " : " ++ goalType ++ " := by"
     let rootVars := varSorts.map (·.1)
     header ++ "\n" ++ translateTree defaultSimpPred sorts 1 [] rootVars varSorts t
+  | t =>
+    "-- unsupported root (expected .caseSplit); got: " ++ t.label
+
+/-! ### Well-founded recursion emission (paper-style)
+
+This is the more faithful translation of cyclic proofs as the paper
+describes them: the back-edges become recursive calls of the proven
+function, and the soundness of the cyclic structure is discharged by
+emitting `termination_by <measure>` with the measure synthesised from
+the SCT graphs.
+
+Where the `induction`-based emission relied on the case-split tree
+*coincidentally* aligning with what Lean's structural induction
+accepts, this emission carries the cyclic-proof's measure into the
+output: `WellFounded.fix` (via Lean's `termination_by`) discharges
+each recursive call against the chosen measure exactly as the paper's
+unravelling step prescribes.
+-/
+
+/-- Render a synthesised `Measure` as a Lean term suitable for the
+    `termination_by` clause. Variables of type `Nat` are used directly;
+    anything else is wrapped in `sizeOf` to convert to `Nat`. -/
+def measureToString (varSorts : List (String × SortInfo)) (m : Measure) : String :=
+  let renderVar (i : Nat) : String :=
+    match varSorts[i]? with
+    | some (v, si) =>
+      if si.typeStr == "Nat" then v else "(sizeOf " ++ v ++ ")"
+    | none => "_"
+  let rec mkTuple : List String → String
+    | []  => "0"
+    | [x] => x
+    | x :: xs => "(" ++ x ++ ", " ++ mkTuple xs ++ ")"
+  match m with
+  | .lex []   => "0"
+  | .lex [i]  => renderVar i
+  | .lex idxs => mkTuple (idxs.map renderVar)
+  | .sum 0    => "0"
+  | .sum n    =>
+    String.intercalate " + " ((List.range n).map renderVar)
+
+/-- Extract the back-edge's argument list from its sequent (assumes a
+    single-formula succedent — our standard sequent shape). -/
+def backArgsOf (seq : Sequent) : List SubjectTerm :=
+  match seq.succedents with
+  | f :: _ => f.args
+  | []     => match seq.antecedents with
+    | f :: _ => f.args
+    | []     => []
+
+mutual
+
+/-- Emit the body of one node in the proof tree as a Lean *term* (or
+    a `by`-wrapped tactic block when the node closes a goal). For a
+    `cyclic_thm` translation, this term is the body of the recursive
+    `def`. -/
+partial def walkWFBody (sorts : List SortInfo) (defaultSimpPred : Option String)
+    (thmName : String) (depth : Nat) : ProofTree → String
+  | .leaf _ _ _ closeTac =>
+    let body := match closeTac with
+      | none     => defaultSimp defaultSimpPred
+      | some tac => tac
+    -- `by\n  <tactics>` form: avoids the parsing fragility of inline
+    -- `by tac1\n  tac2` where Lean's tactic parser sometimes treats
+    -- the second line as a separate term rather than continuing the
+    -- tactic block.
+    pad depth ++ "by\n" ++ pad (depth + 1) ++ reindent (depth + 1) body
+  | .identity _ _ =>
+    pad depth ++ "by assumption"
+  | .back _ seq _ _ closeTac =>
+    -- The recursive call: helper applied to the back-edge's args.
+    let bArgs := backArgsOf seq
+    let argsStr := String.intercalate " " (bArgs.map (termToLean sorts))
+    let recCall := thmName ++ " " ++ argsStr
+    let body := match closeTac with
+      | none     => defaultSimp defaultSimpPred ++ "\n" ++ "exact " ++ recCall
+      | some tac => tac.replace "recurse" ("exact " ++ recCall)
+    pad depth ++ "by\n" ++ pad (depth + 1) ++ reindent (depth + 1) body
+  | .node _ _ "branch" children =>
+    -- Multi-branch: unfold then exact ⟨...⟩ with each child as a term.
+    let childTerms := children.map fun child =>
+      match child with
+      | .back _ seq _ _ closeTac =>
+        let bArgs := backArgsOf seq
+        let argsStr := String.intercalate " " (bArgs.map (termToLean sorts))
+        let recCall := "(" ++ thmName ++ " " ++ argsStr ++ ")"
+        match closeTac with
+        | none     => recCall
+        | some tac => "(by " ++ (tac.replace "recurse" ("exact " ++ recCall)) ++ ")"
+      | .leaf _ _ _ closeTac =>
+        let body := match closeTac with
+          | none     => defaultSimp defaultSimpPred
+          | some tac => tac
+        "(by " ++ body ++ ")"
+      | _ => "(sorry /- complex branch child NYI -/)"
+    let preludeBody := defaultSimp defaultSimpPred ++ "\n"
+      ++ pad (depth + 1) ++ "exact ⟨" ++ String.intercalate ", " childTerms ++ "⟩"
+    pad depth ++ "by\n" ++ pad (depth + 1) ++ preludeBody
+  | .node _ _ _ [] =>
+    pad depth ++ "by " ++ defaultSimp defaultSimpPred
+  | .node _ _ _ [child] =>
+    -- "unfold" wrapper: the simp prefix is rolled into the back's body
+    -- if the child is a back-edge; for general children, recurse.
+    walkWFBody sorts defaultSimpPred thmName depth child
+  | .node lbl _ _ _ =>
+    pad depth ++ "(sorry /- multi-child node '" ++ lbl ++ "' not branch -/)"
+  | .caseSplit _ _ var cases =>
+    walkWFCaseSplit sorts defaultSimpPred thmName depth var cases
+
+partial def walkWFCaseSplit (sorts : List SortInfo) (defaultSimpPred : Option String)
+    (thmName : String) (depth : Nat) (var : String)
+    (cases : List (SubjectTerm × ProofTree)) : String :=
+  let arms := cases.map fun (pat, sub) =>
+    let patStr := termToLean sorts pat
+    let body := walkWFBody sorts defaultSimpPred thmName (depth + 1) sub
+    pad depth ++ "| " ++ patStr ++ " =>\n" ++ body
+  pad depth ++ "match " ++ var ++ " with\n" ++ String.intercalate "\n" arms
+
+end
+
+/-- Top-level WF emitter. Produces:
+    ```
+    def <thmName> : ∀ <binders>, <goalType> := fun <args> =>
+      <body>
+    termination_by <args> => <measure>
+    ```
+    Falls back to a `def … := sorry` placeholder if root isn't a caseSplit. -/
+def translateWF (defaultSimpPred : Option String) (goalType thmName : String)
+    (varSorts : List (String × SortInfo)) (measure : Option Measure)
+    : ProofTree → String
+  | t@(.caseSplit _ _ _ _) =>
+    let sorts := varSorts.map (·.2)
+    let bindings := varSorts.map fun (v, si) => "(" ++ v ++ " : " ++ si.typeStr ++ ")"
+    let argList := String.intercalate " " (varSorts.map (·.1))
+    let header := "def " ++ thmName ++ " : ∀ " ++ String.intercalate " " bindings
+                    ++ ", " ++ goalType ++ " := fun " ++ argList ++ " =>\n"
+    let body := walkWFBody sorts defaultSimpPred thmName 1 t
+    let termClause := match measure with
+      | some m =>
+        let measureStr := measureToString varSorts m
+        "termination_by " ++ argList ++ " => " ++ measureStr
+      | none => ""
+    let trailer :=
+      if termClause.isEmpty then "" else "\n" ++ termClause
+    header ++ body ++ trailer
   | t =>
     "-- unsupported root (expected .caseSplit); got: " ++ t.label
 

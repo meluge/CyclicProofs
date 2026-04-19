@@ -16,3 +16,6 @@ import Cyclic.ProofExample4
 import Cyclic.ProofExample5
 import Cyclic.ProofExample6
 import Cyclic.ProofExample7
+import Cyclic.ProofExample8
+import Cyclic.ProofExample9
+import Cyclic.ProofExample10
