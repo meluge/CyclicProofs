@@ -405,6 +405,18 @@ def backArgsOf (seq : Sequent) : List SubjectTerm :=
     | f :: _ => f.args
     | []     => []
 
+/-- Build a `-- back-edge <lbl>: prog = aN` comment line (with trailing
+    indent for the next body line) when the back-edge has an annotation
+    in `progMap`; empty string otherwise. Inserted at the top of each
+    back-edge's `by`-block so the emitted def documents which argument
+    position discharges the SCT cycle through that back-edge. -/
+def progCommentFor (progMap : List (String × Nat)) (lbl : String) (depth : Nat)
+    : String :=
+  match progMap.lookup lbl with
+  | some pos =>
+    "-- back-edge " ++ lbl ++ ": prog = a" ++ toString pos ++ "\n" ++ pad depth
+  | none => ""
+
 mutual
 
 /-- Emit the body of one node in the proof tree as a Lean *term* (or
@@ -412,7 +424,8 @@ mutual
     `cyclic_thm` translation, this term is the body of the recursive
     `def`. -/
 partial def walkWFBody (sorts : List SortInfo) (defaultSimpPred : Option String)
-    (thmName : String) (depth : Nat) : ProofTree → String
+    (thmName : String) (progMap : List (String × Nat)) (depth : Nat)
+    : ProofTree → String
   | .leaf _ _ _ closeTac =>
     let body := match closeTac with
       | none     => defaultSimp defaultSimpPred
@@ -424,7 +437,7 @@ partial def walkWFBody (sorts : List SortInfo) (defaultSimpPred : Option String)
     pad depth ++ "by\n" ++ pad (depth + 1) ++ reindent (depth + 1) body
   | .identity _ _ =>
     pad depth ++ "by assumption"
-  | .back _ seq _ _ closeTac =>
+  | .back lbl seq _ _ closeTac =>
     -- The recursive call: helper applied to the back-edge's args.
     let bArgs := backArgsOf seq
     let argsStr := String.intercalate " " (bArgs.map (termToLean sorts))
@@ -432,9 +445,14 @@ partial def walkWFBody (sorts : List SortInfo) (defaultSimpPred : Option String)
     let body := match closeTac with
       | none     => defaultSimp defaultSimpPred ++ "\n" ++ "exact " ++ recCall
       | some tac => tac.replace "recurse" ("exact " ++ recCall)
-    pad depth ++ "by\n" ++ pad (depth + 1) ++ reindent (depth + 1) body
+    let comment := progCommentFor progMap lbl (depth + 1)
+    pad depth ++ "by\n" ++ pad (depth + 1) ++ comment
+      ++ reindent (depth + 1) body
   | .node _ _ "branch" children =>
     -- Multi-branch: unfold then exact ⟨...⟩ with each child as a term.
+    -- Branch children are emitted as terms, where line comments don't
+    -- compose cleanly with tuples; we surface their progs via the
+    -- annotation diagnostic instead.
     let childTerms := children.map fun child =>
       match child with
       | .back _ seq _ _ closeTac =>
@@ -458,18 +476,18 @@ partial def walkWFBody (sorts : List SortInfo) (defaultSimpPred : Option String)
   | .node _ _ _ [child] =>
     -- "unfold" wrapper: the simp prefix is rolled into the back's body
     -- if the child is a back-edge; for general children, recurse.
-    walkWFBody sorts defaultSimpPred thmName depth child
+    walkWFBody sorts defaultSimpPred thmName progMap depth child
   | .node lbl _ _ _ =>
     pad depth ++ "(sorry /- multi-child node '" ++ lbl ++ "' not branch -/)"
   | .caseSplit _ _ var cases =>
-    walkWFCaseSplit sorts defaultSimpPred thmName depth var cases
+    walkWFCaseSplit sorts defaultSimpPred thmName progMap depth var cases
 
 partial def walkWFCaseSplit (sorts : List SortInfo) (defaultSimpPred : Option String)
-    (thmName : String) (depth : Nat) (var : String)
+    (thmName : String) (progMap : List (String × Nat)) (depth : Nat) (var : String)
     (cases : List (SubjectTerm × ProofTree)) : String :=
   let arms := cases.map fun (pat, sub) =>
     let patStr := termToLean sorts pat
-    let body := walkWFBody sorts defaultSimpPred thmName (depth + 1) sub
+    let body := walkWFBody sorts defaultSimpPred thmName progMap (depth + 1) sub
     pad depth ++ "| " ++ patStr ++ " =>\n" ++ body
   pad depth ++ "match " ++ var ++ " with\n" ++ String.intercalate "\n" arms
 
@@ -481,9 +499,16 @@ end
       <body>
     termination_by <args> => <measure>
     ```
-    Falls back to a `def … := sorry` placeholder if root isn't a caseSplit. -/
+    Falls back to a `def … := sorry` placeholder if root isn't a caseSplit.
+
+    `progMap` is an optional per-back-edge progressing-position map
+    (label → position index). When supplied — typically from
+    `Cyclic.Annotation.annotate` — the emitter prepends a
+    `-- back-edge <lbl>: prog = aN` comment to each recursive call's
+    `by`-block, surfacing the SCT cycle's witness in the emitted code. -/
 def translateWF (defaultSimpPred : Option String) (goalType thmName : String)
     (varSorts : List (String × SortInfo)) (measure : Option Measure)
+    (progMap : List (String × Nat) := [])
     : ProofTree → String
   | t@(.caseSplit _ _ _ _) =>
     let sorts := varSorts.map (·.2)
@@ -491,7 +516,7 @@ def translateWF (defaultSimpPred : Option String) (goalType thmName : String)
     let argList := String.intercalate " " (varSorts.map (·.1))
     let header := "def " ++ thmName ++ " : ∀ " ++ String.intercalate " " bindings
                     ++ ", " ++ goalType ++ " := fun " ++ argList ++ " =>\n"
-    let body := walkWFBody sorts defaultSimpPred thmName 1 t
+    let body := walkWFBody sorts defaultSimpPred thmName progMap 1 t
     let termClause := match measure with
       | some m =>
         let measureStr := measureToString varSorts m

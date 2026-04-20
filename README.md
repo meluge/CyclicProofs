@@ -11,10 +11,12 @@ Two user-facing commands:
   synthesises a `termination_by` measure, emits a plain Lean `def`.
 - **`cyclic_thm`** — cyclic proofs of inductive theorems. Three surface
   forms (legacy explicit-tree, predicate + `by_cyclic` DSL, inline-goal
-  + `by_cyclic` DSL). Validates SCT, synthesises a measure from the SCT
-  closure witnesses, emits a `def : ∀ args, goal := … termination_by …`
+  + `by_cyclic` DSL). Validates SCT, computes a paper-style reset
+  annotation (per-back-edge progressing name + global induction order),
+  synthesises a measure, emits a `def : ∀ args, goal := … termination_by …`
   where each cyclic back-edge becomes a recursive call discharged by the
-  measure.
+  measure and tagged with a `-- back-edge … prog = aN` comment citing
+  which argument position carries the SCT cycle.
 
 Soundness comes from the kernel: every emitted declaration is rechecked,
 so an unraveller bug breaks the build, not the theorem.
@@ -66,17 +68,22 @@ cyclic_thm myT_all : myT t by_cyclic
   ProofTree (case-splits + back-edges + σ)
         │
         ▼  extractTraceSCGs (per-occurrence, σ-substituted)
-  size-change graphs, one per back-edge
+  size-change graphs, one per back-edge (labelled)
         │
         ▼  SCGraph.checkMultiSCT (composition closure + idempotent check)
      pass / fail   ──► reject if SCT fails
+        │
+        ▼  Cyclic.Annotation.annotate (paper-style reset annotation)
+  per back-edge: progressing name (= position) + cycle witness
+  global: induction order on positions
         │
         ▼  synthMeasure: cascade of schemas
   measure (lex perm | lex subset | sum | greedy from closure witnesses)
         │
         ▼  Cyclic.Unravel.translateWF
   Lean script:  def name : ∀ args, goal := fun args => match … termination_by …
-                each back-edge becomes a recursive call to `name`
+                each back-edge becomes a recursive call to `name`,
+                annotated `-- back-edge <lbl>: prog = aN`
         │
         ▼  Lean.elabCommand
   kernel-checked def + WF recursion validates each call against the measure
@@ -140,18 +147,13 @@ even inside custom tactic blocks.
 
 ## Worked examples
 
-| File | Theorem | What it shows |
-| --- | --- | --- |
-| `Cyclic/ProofExample.lean`   | `∀ x : Nat, myP x` | smallest cyclic proof; explicit-tree form |
-| `Cyclic/ProofExample2.lean`  | `∀ x y : Nat, myQ x y` | back-edge re-binds non-induction var |
-| `Cyclic/ProofExample3.lean`  | `∀ x y : Nat, myB x y` | lex descent, multiple ancestors, nested case-splits |
-| `Cyclic/ProofExample4.lean`  | `∀ xs : List Nat, myL xs` | non-Nat inductive type via auto-introspection |
-| `Cyclic/ProofExample5.lean`  | DSL versions of the above + `worker_terminates` | termination of a state-machine model |
-| `Cyclic/ProofExample6.lean`  | `∀ s : Stack, myS s` | user-defined inductive |
-| `Cyclic/ProofExample7.lean`  | `myAdd n 0 = n`, `myAdd 0 n = n` | inline-goal form proving real (not propositionally trivial) inductive theorems |
-| `Cyclic/ProofExample8.lean`  | `∀ t : BinTree, myT t` | **multi-recursive constructor** (`node l r`); branching back-edges |
-| `Cyclic/ProofExample9.lean`  | `∀ x y, swapP x y` | **sum-measure cyclic proof** — neither argument structurally decreases, but their sum does. Demonstrates WF emission enables proofs nested induction can't express. |
-| `Cyclic/ProofExample10.lean` | `∀ m n, 0 < ack m n` | **Ackermann** (paper Example 4.2); compound substitution RHS, two back-edges, lex measure |
+Three files in `Cyclic/Examples/`, each with progressively harder cases:
+
+| File | Contents |
+| --- | --- |
+| `Cyclic/Examples/Foundations.lean` | Smallest cyclic proof (`∀ x : Nat, simpleP x`) built in the explicit-`ProofTree` form so the data structure is visible. Step-by-step: formulas → sequents → tree → trace extraction → SCT → `cyclic_thm`. Includes a negative example where SCT correctly rejects a non-strict trace. Read this to understand what's underneath the DSL. |
+| `Cyclic/Examples/DSL.lean` | Tour of the `by_cyclic` DSL surface forms via four progressively-richer examples: (1) predicate form on Nat, (2) non-Nat inductive (`List Nat`) via auto-introspection, (3) lex descent across two variables with nested case-splits and labelled ancestors, (4) inline-goal form proving a real inductive theorem (`myAdd n 0 = n`) using `recurse`. |
+| `Cyclic/Examples/Advanced.lean` | The paper-faithful demonstrations: (1) **sum measure** via swap-style recursion (the case nested induction can't express), (2) **multi-recursive constructor** (`BinTree.node l r`) with branching back-edges via `branch · … · …`, (3) **Ackermann** (Grotenhuis-Otten Example 4.2) — compound substitution RHS, two back-edges, lex measure synthesised from closure witnesses, (4) **three-position lex** with three back-edges descending on three distinct positions — exercises the per-back-edge attribution of the reset annotation (prog = a0, a1, a2 respectively). |
 
 ## Module layout
 
@@ -160,13 +162,14 @@ even inside custom tactic blocks.
 | `Cyclic/SizeChange.lean` | `SCGraph`, composition, canonicalisation, `checkMultiSCT`. |
 | `Cyclic/Extract.lean` | `Pattern` / `Term` / `Equation` AST; `extractAllSCGs`. |
 | `Cyclic/Measure.lean` | Measure synthesis cascade: `synthLexOrder` → `synthLexSubset` → `sumMeasureWorks` → `synthLexGreedy`. Closure-witness extraction. |
+| `Cyclic/Annotation.lean` | Paper-style reset annotation (Grotenhuis-Otten §5): per-back-edge progressing name from the closure idempotent + global induction order. Surfaced in the `cyclic_thm` diagnostic and as `-- back-edge … prog = aN` comments in emitted code. |
 | `Cyclic/Syntax.lean` | The `cyclic_def` command. |
 | `Cyclic/ProofTree.lean` | `SubjectTerm` / `Formula` / two-sided `Sequent` / `ProofTree`; per-occurrence trace extraction (`extractTraceSCGs`). |
 | `Cyclic/Unravel.lean` | `translateWF` — emit a Lean WF-recursion `def` with `termination_by`, with each back-edge as a recursive call. The legacy `translate` (induction-based) is still present but unused. |
 | `Cyclic/ThmCmd.lean` | The `cyclic_thm` command (legacy form 1) + the shared `runCyclicThmCore` backend. |
 | `Cyclic/Tactic.lean` | The `by_cyclic` DSL: syntax (`done` / `back` / `cases` / `branch` / labels / `by tac`), walker, elab rules for forms 2 and 3, the `recurse` placeholder tactic. |
 | `Cyclic/Example.lean` | `cyclic_def` demos: `swapAdd`, `ack2`, a non-terminating swap rejected at elaboration. |
-| `Cyclic/ProofExample{,2..10}.lean` | `cyclic_thm` demos. |
+| `Cyclic/Examples/{Foundations,DSL,Advanced}.lean` | `cyclic_thm` demos, organised by depth (see *Worked examples* below). |
 | `Main.lean` | Tiny executable. |
 
 ## Trace extraction (proofs side)
@@ -214,6 +217,36 @@ flat-arity setting. Closure witnesses and the synthesised measure are
 both surfaced in the `cyclic_thm` info message after every successful
 elaboration.
 
+## Reset annotation (paper §5)
+
+After SCT validates and a measure is synthesised, `Cyclic.Annotation`
+computes a paper-style *reset annotation*: for each back-edge, walk to
+its closure idempotent, extract the strict-self-loop positions
+(= candidate progressing names from Theorem 5.2), and choose the one
+consistent with a global induction order built from the same closure.
+
+The annotation is shown in the diagnostic and threaded into the
+emitter as a per-back-edge prog map. Each recursive call in the output
+gets a `-- back-edge <lbl>: prog = aN` comment, so the SCT cycle's
+descent witness is inspectable in the kernel-checked `def` and not
+just in the elaborator's info message. Example diagnostic for a
+three-position lex proof:
+
+```text
+induction order: a0 ≻ a1 ≻ a2
+back-edges:
+  _B1: prog = a0; candidates = {0}; cycle = SCGraph(3 → 3): [0 ->→ 0, 2 -≥→ 2]
+  _B3: prog = a1; candidates = {1}; cycle = SCGraph(3 → 3): [0 -≥→ 0, 1 ->→ 1]
+  _B4: prog = a2; candidates = {2}; cycle = SCGraph(3 → 3): [0 -≥→ 0, 1 -≥→ 1, 2 ->→ 2]
+```
+
+In the paper's framework this is the Stack/Name annotation (Definition
+5.1) with the reset condition (Theorem 5.2) discharged by SCT. We do
+*not* implement the proof-tree reorganisation of Proposition 5.8 —
+unnecessary in our setting because Lean's `WellFounded.fix` provides a
+single uniform top-level IH, abstracting over the >-ind_x nesting order
+the paper makes explicit at each sprout.
+
 ## Pretty-print / introspection
 
 `cyclic_thm` introspects the predicate's signature (or each binder's
@@ -242,8 +275,13 @@ any inductive already in the environment works.
 - **Per-call descent witnesses** are delegated to Lean's
   `decreasing_by` machinery rather than emitted explicitly. The paper's
   `avail(a)` witnesses are constructed as proof terms; ours are
-  reconstructed by Lean's WF prover. Functionally equivalent for the
-  cases that work.
+  reconstructed by Lean's WF prover. The reset annotation pass
+  surfaces *which* position should descend per back-edge (in the
+  diagnostic and in `-- prog = aN` comments) but the Lean-side proof of
+  decrease is still produced by `decreasing_tactic`, not constructed
+  from the SCT closure witness directly.
+- **Proof-tree reorganisation** per Proposition 5.8 is not implemented;
+  see *Reset annotation* above.
 - **Richer-than-lex/sum measures** (multiset orderings, polynomial
   measures) for SCT-passing graphs that the synthesis cascade can't
   capture. Rare in practice but theoretically possible.

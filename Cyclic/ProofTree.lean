@@ -303,4 +303,32 @@ partial def extractTraceSCGsAux
 def extractTraceSCGs (t : ProofTree) : List SCGraph :=
   extractTraceSCGsAux [] t
 
+/-! ### Labeled trace extraction
+
+Pairs each emitted trace SCG with the back-edge's label. Used by the
+annotation pass (`Cyclic.Annotation`) to attribute progressing-name
+choices back to specific back-edges in diagnostics and emitted code. -/
+
+partial def extractTraceSCGsLabeledAux
+    (ancestors : List (String × Sequent × Subst)) :
+    ProofTree → List (String × SCGraph)
+  | .leaf _ _ _ _ => []
+  | .identity _ _ => []
+  | .node lbl seq _ children =>
+    let ancestors' := (lbl, seq, []) :: ancestors
+    children.flatMap (extractTraceSCGsLabeledAux ancestors')
+  | .caseSplit lbl seq var cases =>
+    let ancestors' := (lbl, seq, []) :: ancestors
+    cases.flatMap fun (pat, sub) =>
+      let extended := ancestors'.map fun (l, s, σ) => (l, s, (var, pat) :: σ)
+      extractTraceSCGsLabeledAux extended sub
+  | .back lbl bSeq anc _ _ =>
+    match ancestors.find? (fun (l, _, _) => l == anc) with
+    | none => []
+    | some (_, aSeq, pathSubst) =>
+      [(lbl, buildTraceGraph aSeq bSeq pathSubst)]
+
+def extractTraceSCGsLabeled (t : ProofTree) : List (String × SCGraph) :=
+  extractTraceSCGsLabeledAux [] t
+
 end Cyclic.Proof

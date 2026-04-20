@@ -3,6 +3,7 @@ import Cyclic.ProofTree
 import Cyclic.Unravel
 import Cyclic.SizeChange
 import Cyclic.Measure
+import Cyclic.Annotation
 
 /-!
 # The `cyclic_thm` command
@@ -137,6 +138,7 @@ def runCyclicThmCore
     : CommandElabM Unit := do
   -- Step 1: SCT check.
   let graphs := Cyclic.Proof.extractTraceSCGs proofTree
+  let labeledGraphs := Cyclic.Proof.extractTraceSCGsLabeled proofTree
   unless SCGraph.checkMultiSCT graphs do
     let lines := graphs.map fun g => "  " ++ toString g
     throwErrorAt nameStx
@@ -156,15 +158,30 @@ def runCyclicThmCore
     match measureOpt with
     | some m => toString m
     | none   => "(none — SCT closure passes but no lex/sum measure)"
-  -- Compute closure witnesses too: makes the SCT soundness witness
-  -- (which positions strictly decrease in each idempotent of the closure)
-  -- visible to the user, regardless of which schema the synthesizer
-  -- ended up using.
+  -- Step 2b: paper-style reset annotation — assigns each back-edge a
+  -- progressing name from the closure-idempotent witness, and a global
+  -- induction order. `progMap` feeds the per-back-edge comments the
+  -- emitter prepends to each recursive call.
+  let annotOpt : Option Cyclic.Annotation.ProofAnnot :=
+    match Cyclic.Annotation.annotate labeledGraphs rootArity with
+    | .ok a => some a
+    | .error _ => none
+  let annotStr : String :=
+    match annotOpt with
+    | some a  => Cyclic.Annotation.render a
+    | none    => "(annotation unavailable)"
+  let progMap : List (String × Nat) :=
+    match annotOpt with
+    | some a  => a.backEdges.map fun be => (be.label, be.progPos)
+    | none    => []
+  -- Closure witnesses: raw strict-self-loop positions per idempotent.
+  -- Still surfaced alongside the annotation because it makes the SCT
+  -- analysis legible even when annotation-level attribution fails.
   let witnessStr := witnessesToString graphs rootArity
   -- Step 3: emit (paper-style well-founded recursion) and elaborate.
   let thmName := toString nameStx.getId
   let script := Cyclic.Unravel.translateWF defaultSimpPred goalType thmName
-                  varSorts measureOpt proofTree
+                  varSorts measureOpt progMap proofTree
   let env ← getEnv
   match Lean.Parser.runParserCategory env `command script with
   | .error msg =>
@@ -175,7 +192,8 @@ def runCyclicThmCore
     elabCommand cmdStx
     logInfoAt nameStx
       ("[cyclic_thm " ++ thmName ++ "] multi-SCT PASS; measure = "
-        ++ measureStr ++ "\nclosure witnesses:\n" ++ witnessStr
+        ++ measureStr ++ "\nannotation:\n" ++ annotStr
+        ++ "\nclosure witnesses:\n" ++ witnessStr
         ++ "\nemitted:\n" ++ script)
 
 /-- Convenience for the predicate form: introspects the predicate
