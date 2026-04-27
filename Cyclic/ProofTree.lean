@@ -19,6 +19,17 @@ propositions rather than definitions.
 
 ## Per-occurrence traces
 
+The trace condition for cyclic proofs comes from Brotherston, "Sequent
+Calculus Proof Systems for Inductive Definitions" (PhD thesis, 2006,
+Ch. 5) and Sprenger-Dam (FoSSaCS 2003): a cyclic proof is sound iff
+every infinite branch carries an infinitely-progressing trace.
+
+The implementation below — flattening sequent positions to integer
+indices and building one `SCGraph` per back-edge — is the standard
+encoding of Brotherston's trace condition into LJBA's size-change
+framework. The vertex flattening, occurrence-pair matching, and edge
+emission rules are original choices; the ideas they encode are not.
+
 For each back-edge `B → A` we emit one `SCGraph` whose vertices are
 `(side, formula-occurrence, arg-position)` triples flattened to a single
 integer index. Edges encode descent between ancestor arg-slots and
@@ -174,6 +185,33 @@ inductive ProofTree where
       sequent under `σ` (which instantiates the ancestor's free variables). -/
   | back (label : String) (seq : Sequent) (ancestor : String) (σ : Subst)
          (closeTactic : Option String := none)
+  /-- An intermediate-lemma step: introduce `haveName : haveTypeStr` proved
+      by `haveProofStr`, then continue with `continuation`. The Lean
+      analogue is `have h : T := by tac; <rest>` in tactic mode.
+
+      `haveTypeStr` and `haveProofStr` are stored as raw Lean source
+      strings rather than `SubjectTerm` / structured tactics: a `have`
+      in a cyclic proof typically introduces facts that are *outside*
+      the cyclic-proof model (arithmetic identities, instances of side
+      lemmas, etc.) — pretending to model them structurally would force
+      a much richer term language without buying anything. The
+      translator pastes these strings into the emitted Lean. Soundness
+      of the cut is checked when the kernel rechecks the emitted def.
+
+      Trace extraction passes through `.haveStep` (a have doesn't
+      case-split, doesn't substitute root variables, and isn't a target
+      for back-edges); the SCT analysis sees only the continuation. -/
+  | haveStep (label : String) (seq : Sequent) (haveName : String)
+             (haveTypeStr : String) (haveProofStr : String)
+             (continuation : ProofTree)
+  /-- An existential-witness step (∃R): for a goal `∃x, φ`, provide
+      `witnessStr` and continue proving `φ[witnessStr/x]`. The Lean
+      emission is `refine ⟨<witness>, ?_⟩` followed by the continuation's
+      translation. Like `.haveStep`, this is a *logical* step — it
+      doesn't case-split, doesn't substitute root variables, and isn't a
+      target for back-edges. Trace extraction passes through. -/
+  | existsStep (label : String) (seq : Sequent) (witnessStr : String)
+               (continuation : ProofTree)
   deriving Inhabited
 
 namespace ProofTree
@@ -184,6 +222,8 @@ def label : ProofTree → String
   | .node lbl _ _ _ => lbl
   | .caseSplit lbl _ _ _ => lbl
   | .back lbl _ _ _ _ => lbl
+  | .haveStep lbl _ _ _ _ _ => lbl
+  | .existsStep lbl _ _ _ => lbl
 
 def sequent : ProofTree → Sequent
   | .leaf _ s _ _ => s
@@ -191,6 +231,8 @@ def sequent : ProofTree → Sequent
   | .node _ s _ _ => s
   | .caseSplit _ s _ _ => s
   | .back _ s _ _ _ => s
+  | .haveStep _ s _ _ _ _ => s
+  | .existsStep _ s _ _ => s
 
 /-- Collect every `(backLabel, ancestorLabel)` pair in the tree. -/
 partial def backEdges : ProofTree → List (String × String)
@@ -199,10 +241,20 @@ partial def backEdges : ProofTree → List (String × String)
   | .node _ _ _ cs => cs.flatMap backEdges
   | .caseSplit _ _ _ cases => cases.flatMap fun (_, t) => backEdges t
   | .back lbl _ anc _ _ => [(lbl, anc)]
+  | .haveStep _ _ _ _ _ cont => backEdges cont
+  | .existsStep _ _ _ cont => backEdges cont
 
 end ProofTree
 
 /-! ### Stage 2: automatic trace extraction
+
+Implements Brotherston's trace condition (PhD thesis 2006, §5.3) by
+recording, for each back-edge `B → A`, how A's argument positions
+relate to B's after the path's case-split substitutions. The structural-
+subterm comparison (`SubjectTerm.strictSubterm` for strict edges,
+`SubjectTerm.structEq` for non-strict) is the trace-progress relation;
+LJBA's size-change framework then decides whether the resulting graphs
+satisfy the global trace condition.
 
 For each back-edge `B → A`, walk the path from the root, accumulating
 every case-split binding into a path substitution `σ_path`. At the
@@ -298,6 +350,16 @@ partial def extractTraceSCGsAux
     | none => []  -- dangling back-edge; ignore
     | some (_, aSeq, pathSubst) =>
       [buildTraceGraph aSeq bSeq pathSubst]
+  | .haveStep _ _ _ _ _ cont =>
+    -- A `have` doesn't contribute to traces (it's not a case-split,
+    -- doesn't substitute root vars, isn't a back-edge target). Trace
+    -- extraction looks straight through to the continuation.
+    extractTraceSCGsAux ancestors cont
+  | .existsStep _ _ _ cont =>
+    -- Likewise for `exists`: the existential witness is a logical step,
+    -- not a case-split or back-edge. Trace extraction descends to the
+    -- continuation unchanged.
+    extractTraceSCGsAux ancestors cont
 
 /-- Entry point: one `SCGraph` per back-edge in the tree. -/
 def extractTraceSCGs (t : ProofTree) : List SCGraph :=
@@ -327,6 +389,10 @@ partial def extractTraceSCGsLabeledAux
     | none => []
     | some (_, aSeq, pathSubst) =>
       [(lbl, buildTraceGraph aSeq bSeq pathSubst)]
+  | .haveStep _ _ _ _ _ cont =>
+    extractTraceSCGsLabeledAux ancestors cont
+  | .existsStep _ _ _ cont =>
+    extractTraceSCGsLabeledAux ancestors cont
 
 def extractTraceSCGsLabeled (t : ProofTree) : List (String × SCGraph) :=
   extractTraceSCGsLabeledAux [] t

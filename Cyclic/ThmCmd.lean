@@ -4,6 +4,7 @@ import Cyclic.Unravel
 import Cyclic.SizeChange
 import Cyclic.Measure
 import Cyclic.Annotation
+import Cyclic.Reorganize
 
 /-!
 # The `cyclic_thm` command
@@ -163,25 +164,87 @@ def runCyclicThmCore
   -- induction order. `progMap` feeds the per-back-edge comments the
   -- emitter prepends to each recursive call.
   let annotOpt : Option Cyclic.Annotation.ProofAnnot :=
-    match Cyclic.Annotation.annotate labeledGraphs rootArity with
+    match Cyclic.Annotation.annotate labeledGraphs rootArity (some proofTree) with
     | .ok a => some a
     | .error _ => none
   let annotStr : String :=
     match annotOpt with
     | some a  => Cyclic.Annotation.render a
     | none    => "(annotation unavailable)"
-  let progMap : List (String × Nat) :=
-    match annotOpt with
-    | some a  => a.backEdges.map fun be => (be.label, be.progPos)
-    | none    => []
   -- Closure witnesses: raw strict-self-loop positions per idempotent.
   -- Still surfaced alongside the annotation because it makes the SCT
   -- analysis legible even when annotation-level attribution fails.
   let witnessStr := witnessesToString graphs rootArity
-  -- Step 3: emit (paper-style well-founded recursion) and elaborate.
+  -- Step 3: dispatcher — structural emission (nested `induction`) when
+  -- the annotation's induction order lex-validates every back-edge's
+  -- input graph; otherwise fall back to WF emission with a synthesised
+  -- measure. Structural is the paper-faithful path (Wehr §6, Sprenger-
+  -- Dam, Grotenhuis-Otten Theorem 6.1: "preserves the structure of π")
+  -- and produces output that reads like an ordinary Lean inductive
+  -- proof; WF is the catch-all (Lee 2009 measure-synthesis tradition)
+  -- for sum/swap-style cases where descent shows up only in the SCT
+  -- closure, not the per-call graph.
+  let canStructOriginal : Bool :=
+    match annotOpt with
+    | some a => Cyclic.Annotation.ProofAnnot.canStructural a labeledGraphs proofTree varSorts
+    | none   => false
+  -- If structural feasibility fails on the original tree, try
+  -- reorganising it (Grotenhuis-Otten Prop 5.8 / Wehr Ch. 7): permute
+  -- the case-split nesting to match the annotation's induction order,
+  -- then retarget each back-edge based on its descending variable
+  -- (looked up via the annotation's per-back-edge progPos). Re-extract
+  -- trace SCGs from the reorganised + retargeted tree and re-check
+  -- feasibility. If it passes, emit structurally on it; else WF.
+  --
+  -- Why retarget separately: a back-edge that descends on `x` and
+  -- originally targeted the outer `cases y` (because the user happened
+  -- to write y outer) must, after the swap, target the new outer
+  -- `cases x`, not the new inner `cases y`. A simple label remap can't
+  -- compute this; we need descending-variable awareness.
+  let (proofTree', labeledGraphs', useStructural, reorganised) :
+      Cyclic.Proof.ProofTree × List (String × SCGraph) × Bool × Bool :=
+    if canStructOriginal then
+      (proofTree, labeledGraphs, true, false)
+    else
+      match annotOpt with
+      | none   => (proofTree, labeledGraphs, false, false)
+      | some a =>
+        let varOrder := a.varOrder varSorts
+        -- Step 1: reorder case-split nesting.
+        let reorgTree := Cyclic.Reorganize.reorder varOrder proofTree
+        -- Step 2: build descMap (back-edge label → descending variable
+        -- name) from the original annotation, then retarget each back-
+        -- edge's `anc` to the case-split on its descending variable in
+        -- the reorganised scope.
+        let descMap : List (String × String) :=
+          a.backEdges.filterMap fun be =>
+            (varSorts[be.progPos]?).map fun (vName, _) => (be.label, vName)
+        let retargeted := Cyclic.Reorganize.retargetBacks descMap [] reorgTree
+        let reorgGraphs := Cyclic.Proof.extractTraceSCGsLabeled retargeted
+        let reorgOk := Cyclic.Annotation.ProofAnnot.canStructural a reorgGraphs retargeted varSorts
+        if reorgOk then (retargeted, reorgGraphs, true, true)
+        else (proofTree, labeledGraphs, false, false)
+  -- Recompute the prog map from the (possibly reorganised) labeled graphs.
+  let progMap' : List (String × Nat) :=
+    match annotOpt with
+    | some a =>
+      match Cyclic.Annotation.annotate labeledGraphs' rootArity (some proofTree') with
+      | .ok a' => a'.backEdges.map fun be => (be.label, be.progPos)
+      | .error _ => a.backEdges.map fun be => (be.label, be.progPos)
+    | none => []
   let thmName := toString nameStx.getId
-  let script := Cyclic.Unravel.translateWF defaultSimpPred goalType thmName
-                  varSorts measureOpt progMap proofTree
+  let script :=
+    if useStructural then
+      Cyclic.Unravel.translate defaultSimpPred goalType thmName
+        varSorts proofTree'
+    else
+      Cyclic.Unravel.translateWF defaultSimpPred goalType thmName
+        varSorts measureOpt progMap' proofTree'
+  let pathStr :=
+    if useStructural then
+      if reorganised then "structural (nested `induction`, after reorganisation)"
+      else "structural (nested `induction`)"
+    else "WF (`termination_by`)"
   let env ← getEnv
   match Lean.Parser.runParserCategory env `command script with
   | .error msg =>
@@ -192,7 +255,8 @@ def runCyclicThmCore
     elabCommand cmdStx
     logInfoAt nameStx
       ("[cyclic_thm " ++ thmName ++ "] multi-SCT PASS; measure = "
-        ++ measureStr ++ "\nannotation:\n" ++ annotStr
+        ++ measureStr ++ "; emission = " ++ pathStr
+        ++ "\nannotation:\n" ++ annotStr
         ++ "\nclosure witnesses:\n" ++ witnessStr
         ++ "\nemitted:\n" ++ script)
 

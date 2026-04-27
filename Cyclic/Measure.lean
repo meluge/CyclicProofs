@@ -13,18 +13,23 @@ The synthesizer tries several schemas, in order of complexity:
 1. **Lex measure on a permutation of positions** — every input graph has
    a strict self-loop at some position with nonstrict self-loops at all
    earlier positions in the permutation. Captures classic lex termination
-   like Ackermann.
+   like Ackermann. Brute-force enumeration over permutations; the
+   underlying lex-ranking idea is from Lee, "Ranking Functions for
+   Size-Change Termination" (TOPLAS 2009, §3 — max/min lex).
 2. **Lex measure on an ordered subset** — same but allowing positions to
    be omitted from the lex tuple. Catches cases where some arguments
-   don't participate in any descent.
+   don't participate in any descent. (Original generalisation of (1).)
 3. **Sum measure** — the bag of arguments shrinks as a whole (every
    position has an incoming ≥ edge, with at least one strict). Catches
-   swap-style recursions.
+   swap-style recursions. (Standard fallback, also discussed in
+   Lee 2009 §4 as the bag/multiset measure.)
 4. **Closure-witness lex** — compute the SCT composition closure, extract
    for each idempotent the set of positions with strict self-loops, and
    try lex orderings prioritising those positions. This is the paper-
-   faithful synthesis: the measure is constructed from the witnesses
-   that the SCT soundness check produces.
+   faithful synthesis (Grotenhuis-Otten / Leigh-Wehr Definition 5.1's
+   "stack annotation" specialised to flat arity — see `synthLexGreedy`
+   below): the measure is constructed from the witnesses that the SCT
+   soundness check (LJBA Theorem 4) produces.
 
 All schemas validate the chosen measure against the **input** graphs, not
 just the closure idempotents — Lean's `termination_by` requires every
@@ -93,14 +98,17 @@ def synthLexSubset (gs : List SCGraph) (arity : Nat) : Option (List Nat) :=
 /-! ### Closure-witness synthesis (paper-faithful)
 
 For every idempotent `G` in the SCT closure, the multi-graph SCT condition
-guarantees `G` has a strict self-loop at *some* position. The set of such
-positions is a *witness* of the cyclic proof's soundness. The paper's
-unravelling extracts these witnesses and constructs a lex measure where
-each component is a "name" (= position) annotated with a "sort" (= rank
-in the lex priority); see Definition 5.1 of Grotenhuis-Otten.
+(LJBA Theorem 4) guarantees `G` has a strict self-loop at *some* position.
+The set of such positions is a *witness* of the cyclic proof's soundness.
+Grotenhuis-Otten / Leigh-Wehr's reset-proof construction (Definition 5.1
+of Grotenhuis-Otten, "An Abstract Cyclic Proof System") extracts these
+witnesses and constructs a lex measure where each component is a "name"
+(= position) annotated with a "sort" (= rank in the lex priority).
 
 For our flat-arity setting (where "names" are just argument positions),
-the stack-annotated lex measure reduces to a *greedy rank construction*:
+the stack-annotated lex measure reduces to a *greedy rank construction*
+(the algorithm below is original — a flat-arity specialisation; the
+paper's general algorithm handles per-node name introduction/renaming):
 
   1. Compute the SCT closure and extract idempotents.
   2. Iteratively choose lex priorities. At each step, the next-priority

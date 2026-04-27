@@ -2,9 +2,12 @@
 # Size-Change Graphs
 
 Size-change graphs track how arguments change across recursive calls.
-The size-change termination principle (Lee, Jones, Ben-Amram 2001) states
-that a set of mutually recursive functions terminates if every infinite
-call sequence would force an infinite descent in a well-founded domain.
+The size-change termination principle (Lee, Jones, Ben-Amram, "The
+size-change principle for program termination", POPL 2001) states that a
+set of mutually recursive functions terminates if every infinite call
+sequence would force an infinite descent in a well-founded domain. The
+data types here (`SCEdge`, `SCGraph`, `Descent`, composition) follow
+LJBA §3.
 
 This is the mechanism underlying the soundness of cyclic proofs:
 the size-change condition ensures that every cyclic proof can be
@@ -94,10 +97,13 @@ instance : ToString SCGraph where
 
 /-! ### Multi-graph SCT: closure + idempotent check
 
-The size-change principle in its full generality (Lee, Jones, Ben-Amram 2001):
-given a set G of size-change graphs describing the recursive calls of a
-(mutually recursive) function system, termination holds iff every
-**idempotent** graph in the composition-closure of G has a strict self-loop.
+The size-change principle in its full generality (LJBA POPL 2001,
+Theorem 4 / "Size-Change Termination"): given a set G of size-change
+graphs describing the recursive calls of a (mutually recursive) function
+system, termination holds iff every **idempotent** graph in the
+composition-closure of G has a strict self-loop. `closure` and
+`checkMultiSCT` below are the direct implementation of that decision
+procedure (LJBA Algorithm in §4 / Fig. 3).
 
 This subsumes the single-graph power-iteration check above, and handles
 cases like Ackermann where termination is lexicographic rather than single

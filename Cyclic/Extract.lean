@@ -6,7 +6,7 @@ import Cyclic.SizeChange
 Given a syntactic representation of a pattern-matching recursive function,
 automatically compute the size-change graph for each recursive call.
 
-## Extraction rule
+## Extraction rule (Lee-Jones-Ben-Amram POPL 2001, §4 / Definition 3)
 
 For each recursive call `f(a₀, ..., aₘ₋₁)` in the body of an equation with
 caller patterns `(p₀, ..., pₙ₋₁)`, produce an edge from i to j when:
@@ -14,7 +14,7 @@ caller patterns `(p₀, ..., pₙ₋₁)`, produce an edge from i to j when:
   • `aⱼ` is a variable `v` strictly inside `pᵢ`     → edge (i →> j)
   • otherwise                                        → no edge
 
-This is the direct syntactic analog of the paper's size-change analysis:
+This is the direct syntactic analog of LJBA's size-change analysis:
 matching on a constructor makes the pattern variables strictly smaller,
 passing an unchanged variable preserves size.
 -/

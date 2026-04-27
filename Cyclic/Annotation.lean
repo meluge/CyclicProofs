@@ -1,9 +1,12 @@
 import Cyclic.SizeChange
 import Cyclic.Measure
 import Cyclic.ProofTree
+import Cyclic.InductionOrder
 
 /-!
-# Paper-style reset annotation (Grotenhuis-Otten, Section 5)
+# Paper-style reset annotation (Grotenhuis-Otten, "An Abstract Cyclic
+Proof System", §5; cf. Wehr 2025 PhD thesis §3.3-3.4 "stack-controlled /
+reset proofs")
 
 For a cyclic proof that passes SCT, this module computes a *reset
 annotation*: for each back-edge, a "progressing name" — i.e. an argument
@@ -103,37 +106,117 @@ where
 def ProofAnnot.find? (a : ProofAnnot) (label : String) : Option BackEdgeAnnot :=
   a.backEdges.find? (·.label == label)
 
+/-- Variable names corresponding to the annotation's induction order
+    (positions → variable names), looked up via `varSorts` mapping. -/
+def ProofAnnot.varOrder (a : ProofAnnot)
+    (varSorts : List (String × β)) : List String :=
+  a.inductionOrder.filterMap fun i => varSorts[i]?.map (·.1)
+
+/-- Does the proof tree's case-split nesting match the induction order
+    as a prefix? Every path from the root encounters the variables of
+    `order` outermost-first; paths that terminate early (in a leaf or
+    back-edge) are accepted. Paths whose case-split disagrees with the
+    expected variable at any level are rejected.
+
+    Original — this is a Lean-emission-feasibility check, not from the
+    paper. The paper's reset annotation guarantees the *existence* of a
+    valid lex induction over names; we additionally check that the
+    user's case-split nesting *agrees with* that order, because Lean's
+    nested `induction var generalizing rest` only binds the right IH
+    when the surface syntax matches. When this returns `false`, the
+    dispatcher invokes `Cyclic.Reorganize` to reshape the tree. -/
+partial def treeMatchesOrder : List String → Cyclic.Proof.ProofTree → Bool
+  | [], _                                          => true
+  | _, .leaf _ _ _ _                               => true
+  | _, .identity _ _                               => true
+  | _, .back _ _ _ _ _                             => true
+  | order, .node _ _ _ cs                          => cs.all (treeMatchesOrder order)
+  | order, .haveStep _ _ _ _ _ cont                => treeMatchesOrder order cont
+  | order, .existsStep _ _ _ cont                  => treeMatchesOrder order cont
+  | v :: rest, .caseSplit _ _ v' cs                =>
+    if v' == v then cs.all (fun (_, sub) => treeMatchesOrder rest sub)
+    else false
+
+/-- Can the structural emitter (nested `induction` per variable in
+    `inductionOrder`) discharge every back-edge in this proof?
+
+    Two conditions:
+
+    1. **SCG check.** Every input back-edge SCG `lex-validates` against
+       the order — for each back-edge there is a position `p` in the
+       order with strict self-loop in the back-edge's input graph, and
+       every position before `p` has at least a non-strict self-loop.
+    2. **Tree-shape check.** The user's case-split nesting matches the
+       induction order outermost-first (`treeMatchesOrder`). Without
+       this, the IH bound by `induction var generalizing …` doesn't
+       align with what the back-edges need — a back-edge descending on
+       `v_p` expects an enclosing `induction v_p` ancestor; if the
+       tree's outer is a *different* variable, the IH lookup fails.
+
+    When `false` the dispatcher tries reorganisation (`Cyclic.Reorganize`)
+    to permute the case-splits into the right order, then re-checks. If
+    reorganisation can't fix it (sum/swap cases, non-uniform trees,
+    multi-recursive constructors), falls through to WF emission. -/
+def ProofAnnot.canStructural (a : ProofAnnot)
+    (labeledGraphs : List (String × SCGraph))
+    (proofTree : Cyclic.Proof.ProofTree)
+    (varSorts : List (String × β)) : Bool :=
+  ¬ a.inductionOrder.isEmpty
+    && labeledGraphs.all (fun (_, g) => lexValidates a.inductionOrder g)
+    && treeMatchesOrder (a.varOrder varSorts) proofTree
+
 /-- Compute the reset annotation. The `(label, scg)` pairs must
     correspond one-to-one with the proof's back-edges, in extraction
     order — pass the output of `extractTraceSCGsLabeled` directly.
 
+    When `tree?` is supplied, the order-finding uses Wehr Theorem 3.2.4
+    (`Cyclic.InductionOrder.findInductionOrder`) — the paper-faithful
+    SCC-based construction. When the tree isn't available or the
+    algorithm fails (e.g. swap/sum-style proofs with no lex measure),
+    falls back to the closure-witness greedy and brute-force schemas.
+
     Returns `Except String` so SCT failures can be surfaced with a
     diagnostic prefix; callers that have already SCT-validated may
     treat any error as an internal-consistency violation. -/
-def annotate (labeled : List (String × SCGraph)) (arity : Nat) (fuel : Nat := 100)
+def annotate (labeled : List (String × SCGraph)) (arity : Nat)
+    (tree? : Option Cyclic.Proof.ProofTree := none) (fuel : Nat := 100)
     : Except String ProofAnnot := do
   let gs := labeled.map (·.2)
   unless SCGraph.checkMultiSCT gs fuel do
     throw "annotate: SCT failed (some closure idempotent has no strict self-loop)"
-  -- Global induction order: prefer paper-faithful greedy (built from
-  -- closure witnesses); fall back to brute-force permutation; last
-  -- resort is numeric order (used when the only valid measure is sum).
+  -- Try Wehr 3.2.4 first when we have the tree. The algorithm gives
+  -- both the global induction order *and* the per-bud progressing
+  -- assignment in one pass, so we capture its assignment when it
+  -- succeeds and use it directly for `BackEdgeAnnot.progPos`.
+  let wehrAssignment? : Option (List (String × Nat)) :=
+    tree?.bind fun t =>
+      Cyclic.InductionOrder.findInductionOrder t labeled arity
+  -- Global induction order: Wehr → closure-witness greedy → brute-force
+  -- permutation → numeric. Numeric is the last resort for sum cases.
   let order : List Nat :=
-    match synthLexGreedy gs arity fuel with
-    | some o => o
+    match wehrAssignment? with
+    | some asg => Cyclic.InductionOrder.lexOrderFromAssignment asg
     | none =>
-      match synthLexOrder gs arity with
+      match synthLexGreedy gs arity fuel with
       | some o => o
-      | none   => List.range arity
-  -- Per back-edge: walk to its closure idempotent, pick prog by global
-  -- order (first match wins) so prog choices align across back-edges.
+      | none =>
+        match synthLexOrder gs arity with
+        | some o => o
+        | none   => List.range arity
+  -- Per back-edge: prefer Wehr's per-bud assignment when available;
+  -- otherwise compute from the closure idempotent reachable from the
+  -- back-edge, picking the first position in the global order that
+  -- has a strict self-loop in the idempotent.
   let backAnnots := labeled.map fun (lbl, g) =>
     let idem := iterateToIdempotent g fuel
     let strictPositions := idem.strictSelfLoopPositions arity
     let chosen :=
-      match order.find? (fun p => strictPositions.elem p) with
+      match wehrAssignment?.bind (·.lookup lbl) with
       | some p => p
-      | none   => strictPositions.head?.getD 0
+      | none =>
+        match order.find? (fun p => strictPositions.elem p) with
+        | some p => p
+        | none   => strictPositions.head?.getD 0
     { label := lbl
       progPos := chosen
       candidates := strictPositions

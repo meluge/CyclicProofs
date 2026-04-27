@@ -4,6 +4,27 @@ import Cyclic.Measure
 /-!
 # Stage 3: unravelling a validated cyclic proof into a Lean tactic script
 
+Two emission paths, both producing standalone Lean 4 theorems:
+
+  * **Structural emission** (`translate`, below): nested `induction`
+    blocks, one per ordered case-split variable. Follows the
+    Sprenger-Dam structural-translation tradition (Sprenger & Dam,
+    "On the Structure of Inductive Reasoning: Circular and Tree-Shaped
+    Proofs in the μ-Calculus", FoSSaCS 2003 — Theorem 5: every cyclic
+    μ-calculus proof can be unfolded into a tree-shaped proof using
+    well-founded induction on the trace's progressing position). Our
+    setting is restricted (sequent calculus over a single inductive
+    predicate, no μ-binders), so the unfolding is concrete syntax
+    emission rather than a meta-theorem.
+  * **WF emission** (`translateWF`, below): produces a `def … :=`
+    plus `termination_by <measure>`, deferring to Lean's
+    `WellFounded.fix`. This is the unravelling Wehr 2025 PhD thesis
+    Ch. 6 describes for CHA into HA: the cyclic proof becomes a
+    recursive function whose termination is justified by the SCT-
+    derived measure.
+
+Surface form details below.
+
 Consumes a `ProofTree` (plus per-argument sort info introspected from the
 Lean side) and emits a Lean 4 theorem (as a `String`) that proves the
 sequent by well-founded induction on the case-split variables.
@@ -36,7 +57,12 @@ pre-computed sort table.
 A back-edge whose trace graph encodes lex descent is discharged by
 nesting a second `induction` inside the outer `succ`/`cons`/… arm. This
 gives lex-style termination for free — Lean's kernel re-checks the nested
-inductions and the SCT condition guarantees they're well-founded.
+inductions and the SCT condition (Lee-Jones-Ben-Amram POPL 2001) plus
+the lex-order witness from `Cyclic.Annotation` guarantee they're
+well-founded. The Sprenger-Dam Theorem 5 unfolding is what justifies
+that this nested-`induction` *exists* for any SCT-validated cyclic proof
+with a lex measure; emitting it as concrete syntax and the IH-binding
+plumbing (`IHInfo`, `ihCall`, `pathSubst`) below are original.
 -/
 
 namespace Cyclic.Unravel
@@ -180,8 +206,18 @@ def reindent (depth : Nat) (s : String) : String :=
 
 /-- Build the `ih_? args…` expression for a back-edge. Selects the right
     IH from the multi-IH set bound at the ancestor case-split, by looking
-    at `σ`'s image of the case-split's induction variable. -/
-def ihCall (sorts : List SortInfo) (ctx : List IHInfo) (anc : String) (σ : Subst)
+    at `σ`'s image of the case-split's induction variable.
+
+    `pathSubst` is the path-substitution from the root to the back-edge:
+    each enclosing `caseSplit` adds `(var, pat)`. We use it to render
+    each generalised IH arg whose value isn't pinned by `σ` itself —
+    nested `induction` consumes `y` (etc.) from the local context, so at
+    the back-edge `y` is no longer an identifier; we have to emit its
+    case-split-narrowed value (e.g. `0` in the `| 0 =>` arm). For an
+    untouched genVar (no enclosing case-split has bound it), pathSubst
+    has no entry and we emit the variable name unchanged. -/
+def ihCall (sorts : List SortInfo) (ctx : List IHInfo)
+    (pathSubst : Subst) (anc : String) (σ : Subst)
     : String :=
   match ctx.find? (fun info => info.anc == anc) with
   | none =>
@@ -210,7 +246,10 @@ def ihCall (sorts : List SortInfo) (ctx : List IHInfo) (anc : String) (σ : Subs
         let args := info.genVars.map fun v =>
           match σ.lookup v with
           | some t => termToLean sorts t
-          | none   => v
+          | none =>
+            match pathSubst.lookup v with
+            | some t => termToLean sorts t
+            | none   => v
         ihName ++ " " ++ String.intercalate " " args
 
 /-! ### Recursive translator
@@ -236,7 +275,7 @@ mutual
 
 partial def translateTree (defaultSimpPred : Option String) (sorts : List SortInfo)
     (depth : Nat) (ctx : List IHInfo) (ambient : List String)
-    (varSorts : List (String × SortInfo))
+    (varSorts : List (String × SortInfo)) (pathSubst : Subst)
     : ProofTree → String
   | .leaf _ _ _ closeTac =>
     -- Default closes the goal by unfolding the predicate; user can
@@ -257,7 +296,7 @@ partial def translateTree (defaultSimpPred : Option String) (sorts : List SortIn
     -- e.g. `simp [myAdd]; congr 1; recurse` without ever naming the IH
     -- (preserving the cyclic-proof feel where back-edges, not IHs, are
     -- the primitive).
-    let ihExact := "exact " ++ ihCall sorts ctx anc σ
+    let ihExact := "exact " ++ ihCall sorts ctx pathSubst anc σ
     let body := match closeTac with
       | none     => ihExact
       | some tac => tac.replace "recurse" ihExact
@@ -278,20 +317,33 @@ partial def translateTree (defaultSimpPred : Option String) (sorts : List SortIn
       pad depth ++ defaultSimp defaultSimpPred ++ "\n"
         ++ pad depth ++ "refine ⟨" ++ placeholders ++ "⟩"
     let bodies := children.map fun child =>
-      let inner := translateTree defaultSimpPred sorts (depth + 1) ctx ambient varSorts child
+      let inner := translateTree defaultSimpPred sorts (depth + 1) ctx ambient varSorts pathSubst child
       pad depth ++ "·\n" ++ inner
     prelude ++ "\n" ++ String.intercalate "\n" bodies
   | .node _ _ _ [child] =>
     pad depth ++ defaultSimp defaultSimpPred ++ "\n"
-      ++ translateTree defaultSimpPred sorts depth ctx ambient varSorts child
+      ++ translateTree defaultSimpPred sorts depth ctx ambient varSorts pathSubst child
   | .node lbl _ _ _ =>
     pad depth ++ "sorry /- multi-child node '" ++ lbl ++ "' NYI -/"
+  | .haveStep _ _ haveName haveTypeStr haveProofStr cont =>
+    -- `have <name> : <type> := by <proof>; <continuation>`. The proof
+    -- block is reindented to the right depth; the continuation is then
+    -- emitted at the same outer depth so the new hypothesis is in scope
+    -- for everything that follows.
+    pad depth ++ "have " ++ haveName ++ " : " ++ haveTypeStr ++ " := by\n"
+      ++ pad (depth + 1) ++ reindent (depth + 1) haveProofStr ++ "\n"
+      ++ translateTree defaultSimpPred sorts depth ctx ambient varSorts pathSubst cont
+  | .existsStep _ _ witnessStr cont =>
+    -- `exists <witness>` step (∃R). Emits `refine ⟨<witness>, ?_⟩`;
+    -- the continuation proves the residual goal `φ[<witness>/x]`.
+    pad depth ++ "refine ⟨" ++ witnessStr ++ ", ?_⟩\n"
+      ++ translateTree defaultSimpPred sorts depth ctx ambient varSorts pathSubst cont
   | .caseSplit lbl _ var cases =>
-    translateCaseSplit defaultSimpPred sorts depth ctx ambient varSorts lbl var cases
+    translateCaseSplit defaultSimpPred sorts depth ctx ambient varSorts pathSubst lbl var cases
 
 partial def translateCaseSplit (defaultSimpPred : Option String) (sorts : List SortInfo)
     (depth : Nat) (ctx : List IHInfo) (ambient : List String)
-    (varSorts : List (String × SortInfo)) (lbl var : String)
+    (varSorts : List (String × SortInfo)) (pathSubst : Subst) (lbl var : String)
     (cases : List (SubjectTerm × ProofTree)) : String :=
   let genVars := ambient.filter (· != var)
   let ambient' := genVars
@@ -320,7 +372,9 @@ partial def translateCaseSplit (defaultSimpPred : Option String) (sorts : List S
             info :: ctx
         -- All recursive subterm vars get the parent's sort info.
         let varSorts' := ihEntries.foldl (fun acc (v, _) => (v, sortInfo) :: acc) varSorts
-        let body := translateTree defaultSimpPred sorts (depth + 1) ctxForArm ambient' varSorts' sub
+        -- Extend path subst with this arm's narrowing (var ↦ pat).
+        let pathSubst' : Subst := (var, patT) :: pathSubst
+        let body := translateTree defaultSimpPred sorts (depth + 1) ctxForArm ambient' varSorts' pathSubst' sub
         some (pad depth ++ "| " ++ header ++ " =>\n" ++ body)
   pad depth ++ "induction " ++ var ++ genClause ++ " with\n"
     ++ String.intercalate "\n" arms
@@ -355,24 +409,26 @@ def translate (defaultSimpPred : Option String) (goalType thmName : String)
     let header := "theorem " ++ thmName ++ " " ++ String.intercalate " " bindings
                     ++ " : " ++ goalType ++ " := by"
     let rootVars := varSorts.map (·.1)
-    header ++ "\n" ++ translateTree defaultSimpPred sorts 1 [] rootVars varSorts t
+    header ++ "\n" ++ translateTree defaultSimpPred sorts 1 [] rootVars varSorts [] t
   | t =>
     "-- unsupported root (expected .caseSplit); got: " ++ t.label
 
 /-! ### Well-founded recursion emission (paper-style)
 
-This is the more faithful translation of cyclic proofs as the paper
-describes them: the back-edges become recursive calls of the proven
-function, and the soundness of the cyclic structure is discharged by
-emitting `termination_by <measure>` with the measure synthesised from
-the SCT graphs.
+Paper-style: this is the cyclic-proof-as-recursive-function reading
+emphasised in Wehr 2025 PhD thesis Ch. 6 (CHA → HA via Heyting-arithmetic
+recursion) and, more abstractly, in Brotherston 2006 (cyclic proofs as
+fixed-point unfoldings). Back-edges become recursive calls of the proven
+function; the soundness of the cyclic structure is discharged by emitting
+`termination_by <measure>` with the measure synthesised from the SCT
+graphs. The synthesised measure feeds Lean's `WellFounded.fix`, which
+plays the role of the paper's induction-on-trace appeal.
 
 Where the `induction`-based emission relied on the case-split tree
 *coincidentally* aligning with what Lean's structural induction
 accepts, this emission carries the cyclic-proof's measure into the
-output: `WellFounded.fix` (via Lean's `termination_by`) discharges
-each recursive call against the chosen measure exactly as the paper's
-unravelling step prescribes.
+output explicitly. The actual Lean syntax generation (term layout,
+recursive-call rendering, `recurse` token substitution) is original.
 -/
 
 /-- Render a synthesised `Measure` as a Lean term suitable for the
@@ -481,6 +537,19 @@ partial def walkWFBody (sorts : List SortInfo) (defaultSimpPred : Option String)
     pad depth ++ "(sorry /- multi-child node '" ++ lbl ++ "' not branch -/)"
   | .caseSplit _ _ var cases =>
     walkWFCaseSplit sorts defaultSimpPred thmName progMap depth var cases
+  | .haveStep _ _ haveName haveTypeStr haveProofStr cont =>
+    -- WF emission would need to wrap the surrounding term in `by` to
+    -- introduce a local hypothesis. For now, emit a sorry with a
+    -- diagnostic; `have` is supported by the structural emitter, which
+    -- handles the typical case (cyclic_thm whose dispatcher routes
+    -- through structural anyway).
+    let _ := (haveName, haveTypeStr, haveProofStr, cont)
+    pad depth ++ "(sorry /- `have` step not supported in WF emission; "
+      ++ "use the structural path -/)"
+  | .existsStep _ _ witnessStr cont =>
+    let _ := (witnessStr, cont)
+    pad depth ++ "(sorry /- `exists` step not supported in WF emission; "
+      ++ "use the structural path -/)"
 
 partial def walkWFCaseSplit (sorts : List SortInfo) (defaultSimpPred : Option String)
     (thmName : String) (progMap : List (String × Nat)) (depth : Nat) (var : String)

@@ -5,10 +5,15 @@ import Cyclic.Measure
 import Cyclic.Syntax
 import Cyclic.Example
 import Cyclic.ProofTree
+import Cyclic.InductionOrder
 import Cyclic.Annotation
+import Cyclic.Reorganize
 import Cyclic.Unravel
 import Cyclic.ThmCmd
 import Cyclic.Tactic
 import Cyclic.Examples.Foundations
 import Cyclic.Examples.DSL
 import Cyclic.Examples.Advanced
+import Cyclic.Examples.Arithmetic
+import Cyclic.Examples.Reorder
+import Cyclic.Examples.Ackermann

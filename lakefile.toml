@@ -1,9 +1,12 @@
 name = "cyclic"
 version = "0.1.0"
-defaultTargets = ["cyclic"]
+defaultTargets = ["cyclic", "CyclicTactic"]
 
 [[lean_lib]]
 name = "Cyclic"
+
+[[lean_lib]]
+name = "CyclicTactic"
 
 [[lean_exe]]
 name = "cyclic"

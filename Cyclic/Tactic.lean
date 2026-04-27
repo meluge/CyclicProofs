@@ -61,6 +61,20 @@ syntax (name := cycCases)
   "cases " ident " with " withPosition((colGe cyclicArm)+) : cyclic_step
 syntax (name := cycLabel)
   ident ":" cyclic_step : cyclic_step
+/-- `have <name> : <type> := by <tactic-block>` followed by a continuation
+    `cyclic_step`. Introduces a hypothesis into the local context for the
+    rest of the proof. The tactic block's layout is column-based: any
+    tactic at column ≥ the start of the tactic-block body is consumed;
+    the continuation `cyclic_step` should sit at strictly lower
+    indentation. -/
+syntax (name := cycHave)
+  "have" ident ":" term ":=" "by" Lean.Parser.Tactic.tacticSeq cyclic_step : cyclic_step
+/-- `exists <witness> <continuation>` — the ∃R rule. For a goal
+    `∃x, φ`, provides `<witness>` as the value of `x` and continues
+    proving `φ[<witness>/x]`. Emits `refine ⟨<witness>, ?_⟩` in the
+    structural translator. -/
+syntax (name := cycExists)
+  "exists" term cyclic_step : cyclic_step
 
 /-- One branch of a `branch` step: a `·` followed by a sub-step. -/
 syntax cyclicBranch := "·" cyclic_step
@@ -249,6 +263,24 @@ partial def walkStep
         walkStep predName currentArgs ancStack none sub false
       | _ => throwError "malformed branch"
     return .node lbl (mkSequent predName currentArgs) "branch" children
+  | `(cyclic_step| have $haveName:ident : $haveType:term := by $tac:tacticSeq $cont:cyclic_step) => do
+    let nameStr := haveName.getId.toString
+    let typeStr := haveType.raw.reprint.getD "<type>"
+    let proofStr := tac.raw.reprint.getD "<proof>"
+    let lbl ← getLabel "_H"
+    -- Walk continuation: same currentArgs (have doesn't narrow vars);
+    -- same ancStack (have isn't an ancestor for back-edges); no forced
+    -- label for the continuation; preserve autoWrap.
+    let cont' ← walkStep predName currentArgs ancStack none cont autoWrap
+    return .haveStep lbl (mkSequent predName currentArgs) nameStr typeStr proofStr cont'
+  | `(cyclic_step| exists $witness:term $cont:cyclic_step) => do
+    let witnessStr := witness.raw.reprint.getD "<witness>"
+    let lbl ← getLabel "_E"
+    -- Walk continuation with the same args (exists doesn't narrow root
+    -- vars; the existential binder is inside the goal formula, not a
+    -- free variable the trace extractor sees).
+    let cont' ← walkStep predName currentArgs ancStack none cont autoWrap
+    return .existsStep lbl (mkSequent predName currentArgs) witnessStr cont'
   | _ =>
     throwError "unrecognized cyclic step: {stx}"
 
@@ -292,8 +324,9 @@ elab "recurse" : tactic => do
     SCT is validated against the synthetic goal-as-predicate.
 -/
 
-/-- A binder for the inline-goal form: `(name : type)`. -/
-syntax cyclicBinder := "(" ident " : " term ")"
+/-- A binder for the inline-goal form. Allows Lean's natural grouped
+    syntax: `(m n k : Nat)` is shorthand for `(m : Nat) (n : Nat) (k : Nat)`. -/
+syntax cyclicBinder := "(" ident+ " : " term ")"
 
 syntax (name := cyclicThmBy)
   "cyclic_thm " ident " : " ident (ppSpace ident)* " by_cyclic " cyclic_step : command
@@ -315,14 +348,17 @@ elab_rules : command
 
 elab_rules : command
   | `(cyclic_thm $name:ident $binders:cyclicBinder* : $goal:term by_cyclic $step:cyclic_step) => do
-    -- Pull (varName, varType) pairs from the binders.
+    -- Pull (varName, varType) pairs from the binders. A grouped binder
+    -- `(m n k : T)` expands into three separate (varName, T) entries —
+    -- this matches Lean's standard `theorem foo (m n : Nat)` shorthand.
     let mut argNames : List String := []
     let mut argTypeSyns : List (Lean.TSyntax `term) := []
     for b in binders do
       match b with
-      | `(cyclicBinder| ($v:ident : $t:term)) =>
-        argNames := argNames ++ [v.getId.toString]
-        argTypeSyns := argTypeSyns ++ [t]
+      | `(cyclicBinder| ($vs:ident* : $t:term)) =>
+        for v in vs do
+          argNames := argNames ++ [v.getId.toString]
+          argTypeSyns := argTypeSyns ++ [t]
       | _ => throwError "malformed cyclic binder"
     -- Build a SortInfo for each binder type via existing introspection.
     let sorts ← Lean.Elab.Command.liftTermElabM do
