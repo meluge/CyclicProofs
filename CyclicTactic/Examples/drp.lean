@@ -5,6 +5,99 @@ set_option warningAsError false
 
 
 
+
+
+
+theorem plus_zero_std (n : Nat) : 0 + n = n := by 
+  induction n with 
+  | zero => rfl
+  | succ n' ih =>
+    rw [Nat.add_succ]
+    apply congrArg
+    rw [ih]
+
+cyclic_thm plus_zero_cyc (n : Nat) : 0 + n = n by
+  cyclic R
+  cyc_cases n with 
+  | zero => rfl
+  | succ n' =>
+    rw [Nat.add_succ]
+    apply congrArg
+    back R {n := n'}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/-! ## Example 1: 0 + n = n -/
+
+/-! ### Standard Lean -/
+
+theorem zeroAdd_std (n : Nat) : 0 + n = n := by
+  induction n with
+  | zero => rfl
+  | succ n' ih =>
+    rw [Nat.add_succ]
+    apply congrArg Nat.succ
+    rw [ih]
+
+/-! ### Cyclic -/
+
+cyclic_thm zeroAdd_cyc (n : Nat) : 0 + n = n by 
+  cyclic R
+  cyc_cases n with
+  | zero => rfl
+  | succ n' => 
+    rw [Nat.add_succ]
+    apply congrArg Nat.succ
+    back R {n := n'}
+
+
+
+
+/-! ## Example 2: n + m = m + n -/
+
 /-! ### Standard Lean -/
 
 theorem addComm_std (n m : Nat) : n + m = m + n := by
@@ -35,7 +128,7 @@ cyclic_thm addComm_cyc (n m : Nat) : n + m = m + n by
 
 
 
-/-! ## Example 2: Ackermann totality -/
+/-! ## Example 3: Ackermann totality -/
 
 def myAck : Nat → Nat → Nat
   | 0,     n     => n + 1

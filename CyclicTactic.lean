@@ -21,3 +21,4 @@ import CyclicTactic.Examples.Smoke
 import CyclicTactic.Examples.Probe
 import CyclicTactic.Examples.Probe2
 import CyclicTactic.Examples.drp
+import CyclicTactic.Examples.CyclistComparison

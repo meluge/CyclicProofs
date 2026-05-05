@@ -66,6 +66,34 @@ initialize currentThmRef : IO.Ref (Option ThmContext) ← IO.mkRef none
 def setCurrentThm (ctx : Option ThmContext) : IO Unit := currentThmRef.set ctx
 def getCurrentThm : IO (Option ThmContext) := currentThmRef.get
 
+/-! ### Mutual-block context
+
+When elaborating a `cyclic_mutual ... end` block, we need to resolve
+back-edges that target a *different* theorem's induction hypothesis.
+
+  * `mutualThmCtxsRef` — list of every `ThmContext` in the current
+    block (consulted by the hidden `_set_active` tactic).
+  * `mutualCompanionTargetRef` — companion-label → target-`ThmContext`
+    map, populated by `cyclic R` and consulted by `back R {σ}`. A
+    cross-companion back-edge resolves R to the theorem that owns it,
+    whose binders + name are then used to construct the recursive
+    call. For non-mutual `cyclic_thm` the table is empty and `back`
+    falls through to `currentThmRef` (existing behaviour). -/
+
+initialize mutualThmCtxsRef : IO.Ref (List ThmContext) ← IO.mkRef []
+initialize mutualCompanionTargetRef : IO.Ref (List (String × ThmContext)) ← IO.mkRef []
+
+def setMutualThmCtxs (cs : List ThmContext) : IO Unit := mutualThmCtxsRef.set cs
+def getMutualThmCtxs : IO (List ThmContext) := mutualThmCtxsRef.get
+def addMutualCompanion (label : String) (ctx : ThmContext) : IO Unit :=
+  mutualCompanionTargetRef.modify fun ts => (label, ctx) :: ts
+def lookupMutualCompanion (label : String) : IO (Option ThmContext) := do
+  let ts ← mutualCompanionTargetRef.get
+  return (ts.find? (·.1 == label)).map (·.2)
+def resetMutualState : IO Unit := do
+  mutualThmCtxsRef.set []
+  mutualCompanionTargetRef.set []
+
 -- (modifyCyclicState and pushEvent live in CyclicTactic.Build)
 
 /-! ### `cyclic <label>` tactic
@@ -98,11 +126,36 @@ def evalCyclic : Tactic := fun stx => do
     let goalHeadName : Option String := match target'.consumeMData.getAppFn with
       | .const n _ => some n.toString
       | _          => none
+    -- Append (don't replace) so multiple companions accumulate across
+    -- the entries of a `cyclic_mutual` block. For single-`cyclic_thm`
+    -- the state is reset by the command itself before elaboration, so
+    -- this still produces a singleton list there.
+    let st ← getCyclicState
     cyclicStateRef.set {
-      companions := [(labelStr, seq)]
-      events := [.companion labelStr seq]
-      goalHeadName := goalHeadName
+      st with
+      companions := st.companions ++ [(labelStr, seq)]
+      events := .companion labelStr seq :: st.events
+      goalHeadName := st.goalHeadName.orElse (fun _ => goalHeadName)
     }
+    -- Resolve the *active* theorem for this `cyclic R` call. In a
+    -- `cyclic_mutual` block, multiple defs share the same elabCommand
+    -- invocation; we identify which one we're inside via the current
+    -- decl name (Lean tracks this for recursion-detection purposes).
+    -- For single `cyclic_thm`, the mutual table is empty and we fall
+    -- back to `currentThmRef`.
+    let mutCtxs ← getMutualThmCtxs
+    let activeCtx? : Option ThmContext ← do
+      match (← Lean.Elab.Term.getDeclName?) with
+      | some declName =>
+        match mutCtxs.find? (·.thmName == declName) with
+        | some c => pure (some c)
+        | none   => getCurrentThm
+      | none => getCurrentThm
+    if let some ctx := activeCtx? then
+      -- Set as current so `back R {σ}` (without a target lookup hit)
+      -- still works inside this body, and register R → ctx.
+      setCurrentThm (some ctx)
+      addMutualCompanion labelStr ctx
     logInfoAt label m!"[cyclic] companion '{labelStr}' = {target}"
   | _ => throwUnsupportedSyntax
 
@@ -147,17 +200,39 @@ def evalBack : Tactic := fun stx => do
       let goal ← getMainGoal
       let target ← goal.getType
       let st ← getCyclicState
-      let some (_, _companionSeq) := st.companions.find? (·.1 == labelStr)
-        | throwError s!"back: no companion '{labelStr}' in scope. \
-            Available: {st.companions.map (·.1)}"
+      -- The companion must exist either in the live `cyclicStateRef`
+      -- (registered by a prior `cyclic R` call) or in the mutual
+      -- table (pre-registered by `cyclic_mutual` from syntax). Without
+      -- the second branch, a `back R_E` from inside the first entry
+      -- of a mutual block — before R_E's defining `cyclic` has run —
+      -- would falsely report R_E as out-of-scope.
+      let liveCompanion := st.companions.find? (·.1 == labelStr)
+      let mutCompanion ← lookupMutualCompanion labelStr
+      if liveCompanion.isNone ∧ mutCompanion.isNone then
+        let availLive := st.companions.map (·.1)
+        let availMut := (← mutualCompanionTargetRef.get).map (·.1)
+        throwError s!"back: no companion '{labelStr}' in scope. \
+          Available (live): {availLive}; (mutual): {availMut}"
       -- Parse σ as raw (var, Expr) pairs.
       let σExprs : List (String × Lean.Expr) ← match σStx? with
         | none     => pure []
         | some stx => parseSubstExprs stx
-      -- Look up the enclosing theorem context.
-      let some thmCtx ← getCurrentThm
-        | throwError "back: not inside a `cyclic_thm` command. \
-            Use `cyclic_thm` instead of `theorem` to enable back-edges."
+      -- Resolve the *target* theorem for this back-edge. In a
+      -- `cyclic_mutual` block, R may belong to a different theorem
+      -- than the one currently elaborating; the mutual companion table
+      -- records (R → target-ThmContext). For a plain `cyclic_thm`,
+      -- the table either has the lookup (registered when `cyclic R`
+      -- ran) or is empty, in which case we fall back to the enclosing
+      -- theorem's context.
+      let resolved ← lookupMutualCompanion labelStr
+      let thmCtx : ThmContext ← match resolved with
+        | some ctx => pure ctx
+        | none =>
+          match ← getCurrentThm with
+          | some ctx => pure ctx
+          | none =>
+            throwError "back: not inside a `cyclic_thm` or \
+              `cyclic_mutual` command."
       -- Map σ entries to binder positions for the recursive call.
       let argExprs : Array Lean.Expr ← thmCtx.binders.toArray.mapM fun bname => do
         match σExprs.find? (·.1 == bname.toString) with
@@ -327,6 +402,11 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     -- user's name. This works because Lean's `def` allows the body to
     -- reference the def's own name.
     let envBefore ← Lean.getEnv
+    -- Fresh recorder + companion state per `cyclic_thm`. `cyclic R`
+    -- now appends rather than resets, so leakage from a previous
+    -- command would otherwise contaminate this one's tree.
+    resetCyclicState
+    resetMutualState
     setCurrentThm (some { thmName := name.getId, binders := flatBinderNames })
     Lean.Elab.Command.elabCommand
       (← `(def $name:ident $bracketedBinders* : $type:term := by $tacs:tacticSeq))
@@ -440,5 +520,186 @@ def evalCycState : Tactic := fun _ => do
       lines := lines ++ [s!"{pad}back@{pos} R={anc}{σStr}"]
   let body := if lines.isEmpty then "  (no events)" else String.intercalate "\n" lines
   logInfo m!"[cyc_state] companions = [{companionsStr}]\n{body}"
+
+/-! ### `cyclic_mutual ... end` — mutual cyclic theorems
+
+Closes the mutual / cross-predicate cyclic-proof gap (the README's
+flagged biggest limitation). Lets the user write a *coupled* cyclic
+proof — multiple companions, back-edges that cross from one
+companion to another — typeset as a single `cyclic_mutual` block.
+
+Surface form:
+```
+cyclic_mutual
+  thm name₁ (binders) : type₁ by
+    cyclic R₁
+    … back R_j {σ}     -- may target any companion in the block
+  thm name₂ (binders) : type₂ by
+    cyclic R₂
+    …
+end
+```
+
+Soundness: the synthesised body desugars to a `mutual def … end`
+block, so Lean's mutual-recursion termination check provides the
+soundness guarantee (cross-call structural descent). MVP: SCT
+validation across mutual companions is *not* run yet — Lean's
+termination check is authoritative for now. Adding mutual SCT is
+local follow-up work (per-theorem trace extraction → a single
+multi-graph `checkMultiSCT` over (theorem, position) vertices).
+
+`back R {σ}` resolves R via the mutual companion table, then issues
+`exact <R's-thm-name> args-mapped-from-σ-to-that-thm's-binders`.
+The hidden `_set_active` tactic, prepended to each body, switches
+`currentThmRef` so events fire under the right ownership. -/
+
+syntax (name := setActiveTac) "_set_active " ident : tactic
+
+@[tactic setActiveTac]
+def evalSetActive : Tactic := fun stx => do
+  match stx with
+  | `(tactic| _set_active $name:ident) =>
+    let ctxs ← getMutualThmCtxs
+    match ctxs.find? (·.thmName == name.getId) with
+    | some ctx => setCurrentThm (some ctx)
+    | none =>
+      throwError s!"_set_active: no theorem '{name.getId}' in current \
+        mutual block (available: {ctxs.map (·.thmName.toString)})"
+  | _ => throwUnsupportedSyntax
+
+syntax (name := cyclicMutualCmd)
+  "cyclic_mutual"
+    ("thm " ident cycThmBinder+ " : " term " by " Lean.Parser.Tactic.tacticSeq)+
+  "end_mutual"
+  : command
+
+@[command_elab cyclicMutualCmd]
+def elabCyclicMutual : Lean.Elab.Command.CommandElab := fun stx => do
+  -- Pull the (name, binders, type, tacs) for each `thm` entry. The
+  -- `+` repetition packs them in parallel argument arrays at fixed
+  -- offsets in the syntax tree.
+  let nameStxs   : Array Lean.Syntax := stx[1].getArgs.map (·[1])
+  let binderStxs : Array Lean.Syntax := stx[1].getArgs.map (·[2])
+  let typeStxs   : Array Lean.Syntax := stx[1].getArgs.map (·[4])
+  let tacsStxs   : Array Lean.Syntax := stx[1].getArgs.map (·[6])
+  let entryCount := nameStxs.size
+  if entryCount < 2 then
+    Lean.throwError "cyclic_mutual: needs at least two `thm` entries; \
+      use `cyclic_thm` for a single theorem."
+  -- Collect ThmContexts + reconstruct standard bracketed-binder syntax
+  -- per entry.
+  let mut thmCtxs : List ThmContext := []
+  let mut entries :
+      Array (Lean.Ident × Array (Lean.TSyntax `Lean.Parser.Term.bracketedBinder)
+             × Lean.TSyntax `term × Lean.TSyntax `Lean.Parser.Tactic.tacticSeq) := #[]
+  for i in [0:entryCount] do
+    let nameStx : Lean.Ident := ⟨nameStxs[i]!⟩
+    let typeStx : Lean.TSyntax `term := ⟨typeStxs[i]!⟩
+    let tacsStx : Lean.TSyntax `Lean.Parser.Tactic.tacticSeq := ⟨tacsStxs[i]!⟩
+    let binderArr := binderStxs[i]!.getArgs
+    let mut flatBinderNames : List Lean.Name := []
+    let mut bracketedBinders :
+        Array (Lean.TSyntax `Lean.Parser.Term.bracketedBinder) := #[]
+    for b in binderArr do
+      match b with
+      | `(cycThmBinder| ($vs:ident* : $bt:term)) =>
+        for v in vs do flatBinderNames := flatBinderNames ++ [v.getId]
+        let bb ← `(Lean.Parser.Term.bracketedBinderF| ($vs* : $bt))
+        bracketedBinders := bracketedBinders.push bb
+      | _ => Lean.throwErrorAt b "cyclic_mutual: malformed binder"
+    thmCtxs := thmCtxs ++
+      [{ thmName := nameStx.getId, binders := flatBinderNames }]
+    entries := entries.push (nameStx, bracketedBinders, typeStx, tacsStx)
+  -- Reset state and register all ThmContexts so `cyclic R` can
+  -- self-resolve via `getDeclName?`.
+  resetCyclicState
+  resetMutualState
+  setMutualThmCtxs thmCtxs
+  -- Pre-register every companion → target mapping by syntactically
+  -- scanning each entry's tactic source for `cyclic <label>` calls.
+  -- Without this, a back-edge in entry 0 that targets entry 1's
+  -- companion would fail because entry 1's body hasn't elaborated
+  -- yet — companions only get registered when `cyclic <label>`
+  -- actually runs. Pre-registration is safe because the (label →
+  -- ThmContext) mapping is fully determined by syntax.
+  let rec findCyclicLabels (stx : Lean.Syntax) : List String :=
+    match stx with
+    | .node _ kind args =>
+      let here : List String :=
+        if kind == ``cyclicTac then
+          match args[1]? with
+          | some idStx =>
+            match idStx with
+            | .ident _ _ n _ => [n.toString]
+            | _ => []
+          | none => []
+        else []
+      args.foldl (init := here) fun acc c => acc ++ findCyclicLabels c
+    | _ => []
+  for i in [0:entryCount] do
+    let (_, _, _, tacsStx) := entries[i]!
+    let labels := findCyclicLabels tacsStx.raw
+    let ctx := thmCtxs[i]!
+    for lbl in labels do
+      addMutualCompanion lbl ctx
+  -- Synthesise the mutual block as a raw string and reparse via the
+  -- command parser. The `cyclic R` tactic self-identifies its enclosing
+  -- theorem via `getDeclName?` (looked up against `mutualThmCtxsRef`),
+  -- so no per-entry preamble injection is needed. The only subtlety:
+  -- `Syntax.reprint` strips the leading whitespace of the *first* line
+  -- of `tacsStr` but preserves it on subsequent lines, so siblings
+  -- end up at different columns and Lean's indented-tacticSeq parser
+  -- rejects them. `normalizeIndent` re-aligns them to a uniform
+  -- column under the `by` block.
+  let countLeading : String → Nat := fun s => Id.run do
+    let mut n : Nat := 0
+    for c in s.toList do
+      if c == ' ' then n := n + 1 else break
+    return n
+  let normalizeIndent : String → String → String := fun src indentBy =>
+    let lines := src.splitOn "\n"
+    let later := lines.drop 1
+    let nonEmpty := later.filter (fun l => l.any (· != ' ') && !l.isEmpty)
+    let baseIndent : Nat :=
+      if nonEmpty.isEmpty then 0
+      else nonEmpty.foldl (fun m l => Nat.min m (countLeading l)) 1000
+    let processOne : String → String := fun l =>
+      let l' := if countLeading l ≥ baseIndent then l.drop baseIndent else l
+      if l'.isEmpty || l'.all (· == ' ') then "" else indentBy ++ l'
+    String.intercalate "\n" (lines.map processOne)
+  let mut entryTexts : Array String := #[]
+  for i in [0:entryCount] do
+    let (nameStx, bracketedBinders, typeStx, tacsStx) := entries[i]!
+    let nameStr := nameStx.getId.toString
+    let bindersStr := String.intercalate " "
+      (bracketedBinders.toList.map fun b => (b.raw.reprint).getD "")
+    let typeStr := (typeStx.raw.reprint).getD "<reprint-failed>"
+    let tacsStrRaw := (tacsStx.raw.reprint).getD "<reprint-failed>"
+    let tacsStr := normalizeIndent tacsStrRaw "  "
+    entryTexts := entryTexts.push
+      s!"def {nameStr} {bindersStr} : {typeStr} := by\n{tacsStr}"
+  let mutStr := "mutual\n" ++ String.intercalate "\n" entryTexts.toList ++ "\nend"
+  match Lean.Parser.runParserCategory (← Lean.getEnv) `command mutStr with
+  | .ok cmdStx => Lean.Elab.Command.elabCommand cmdStx
+  | .error msg =>
+    Lean.throwError s!"cyclic_mutual: failed to parse synthesised mutual \
+      block:\n{msg}\n\nblock was:\n{mutStr}"
+  -- Per-theorem event diagnostics. The single event log holds events
+  -- from all entries interleaved by elaboration order; render the
+  -- whole stream so the user can see the recorded structure.
+  let st ← getCyclicState
+  let compStr := String.intercalate ", " (st.companions.map (·.1))
+  let mutCompStr ← do
+    let m ← mutualCompanionTargetRef.get
+    pure <| String.intercalate ", "
+      (m.map fun (l, c) => s!"{l}→{c.thmName}")
+  Lean.logInfoAt nameStxs[0]!
+    m!"[cyclic_mutual] entries: {thmCtxs.map (·.thmName.toString)}\n\
+       companions in scope: [{compStr}]\n\
+       companion → target: [{mutCompStr}]\n\
+       events recorded: {st.events.length}"
+  -- Done — clean up.
+  setCurrentThm none
+  resetMutualState
 
 end CyclicTactic
