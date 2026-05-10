@@ -2,6 +2,7 @@ import CyclicTactic.SizeChange
 import CyclicTactic.Measure
 import CyclicTactic.ProofTree
 import CyclicTactic.InductionOrder
+import CyclicTactic.PaperAnnotation
 
 /-!
 # Paper-style reset annotation (Grotenhuis-Otten, "An Abstract Cyclic
@@ -83,6 +84,12 @@ structure ProofAnnot where
       A subset of `[0..arity)` containing every back-edge's `progPos`
       whenever the underlying SCT permits a lex measure. -/
   inductionOrder : List Nat
+  /-- Paper-faithful Theorem 5.2 verification report. `none` when every
+      back-edge satisfies the theorem on the user's tree (or no tree was
+      supplied). `some msg` describes which back-edges fail and why —
+      typically a sign that Proposition 5.8 unfolding would be required
+      to make the paper-faithful path apply. -/
+  paperChecks : Option String := none
   deriving Repr, Inhabited
 
 /-- Iterate `g` under self-composition until it becomes idempotent (or
@@ -191,6 +198,19 @@ def annotate (labeled : List (String × SCGraph)) (arity : Nat)
   let wehrAssignment? : Option (List (String × Nat)) :=
     tree?.bind fun t =>
       CyclicTactic.InductionOrder.findInductionOrder t labeled arity
+  -- Paper-faithful Stack/Name/Reset annotation (Grotenhuis-Otten Def
+  -- 5.1). When the tree is available, run the annotation pass once and
+  -- derive both the per-bud `progSlot?` (overrides the Wehr 3.2.4
+  -- choice for `progPos`) and the Theorem 5.2 verification report.
+  let paperBuds : List CyclicTactic.PaperAnnotation.BudAnnot :=
+    tree?.map CyclicTactic.PaperAnnotation.annotateTree |>.getD []
+  let paperAssignment : List (String × Nat) :=
+    paperBuds.filterMap fun b => b.progSlot?.map (b.bud, ·)
+  let paperChecks : Option String :=
+    if paperBuds.isEmpty then none
+    else
+      CyclicTactic.PaperAnnotation.renderChecks
+        (paperBuds.map CyclicTactic.PaperAnnotation.checkTheorem52)
   -- Global induction order: Wehr → closure-witness greedy → brute-force
   -- permutation → numeric. Numeric is the last resort for sum cases.
   let order : List Nat :=
@@ -211,19 +231,23 @@ def annotate (labeled : List (String × SCGraph)) (arity : Nat)
     let idem := iterateToIdempotent g fuel
     let strictPositions := idem.strictSelfLoopPositions arity
     let chosen :=
-      match wehrAssignment?.bind (·.lookup lbl) with
+      match paperAssignment.lookup lbl with
       | some p => p
       | none =>
-        match order.find? (fun p => strictPositions.elem p) with
+        match wehrAssignment?.bind (·.lookup lbl) with
         | some p => p
-        | none   => strictPositions.head?.getD 0
+        | none =>
+          match order.find? (fun p => strictPositions.elem p) with
+          | some p => p
+          | none   => strictPositions.head?.getD 0
     { label := lbl
       progPos := chosen
       candidates := strictPositions
       cycleWitness := toString idem }
   return { arity := arity
            backEdges := backAnnots
-           inductionOrder := order }
+           inductionOrder := order
+           paperChecks := paperChecks }
 
 /-- Render the annotation as a multi-line diagnostic string. -/
 def render (a : ProofAnnot) : String :=
@@ -239,7 +263,10 @@ def render (a : ProofAnnot) : String :=
       "  " ++ be.label ++ ": prog = a" ++ toString be.progPos
         ++ "; candidates = " ++ cands
         ++ "; cycle = " ++ be.cycleWitness)
-  "induction order: " ++ orderStr ++ "\nback-edges:\n" ++ beStr
+  let paperStr := match a.paperChecks with
+    | none     => ""
+    | some msg => "\npaper-faithful (Thm 5.2) check:\n" ++ msg
+  "induction order: " ++ orderStr ++ "\nback-edges:\n" ++ beStr ++ paperStr
 
 /-! ### Diagnostic checks -/
 

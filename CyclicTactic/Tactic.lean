@@ -2,6 +2,7 @@ import Lean
 import CyclicTactic.ProofTree
 import CyclicTactic.SizeChange
 import CyclicTactic.InductionOrder
+import CyclicTactic.PaperAnnotation
 import CyclicTactic.Build
 
 /-!
@@ -437,7 +438,19 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     let graphsStr :=
       if labeled.isEmpty then "  (no back-edges)"
       else String.intercalate "\n" (labeled.map fun (l, g) => s!"  {l}: {g}")
-    Lean.logInfoAt name m!"[cyclic_thm {name.getId}] SCT: {sctMsg}\n{orderMsg}\nback-edge SCGs:\n{graphsStr}\n\nProofTree:\n{Build.renderTree tree}"
+    -- Paper-faithful (Grotenhuis-Otten Def 5.1) verification: compute
+    -- the Stack/Name/Reset annotation and check Theorem 5.2 on this
+    -- specific tree. When some back-edge fails, surface the report so
+    -- the user knows why the paper-faithful path didn't fire — typical
+    -- causes are name/stack mismatches between sprout and bud, or no
+    -- qualifying progressing name in `Reset(bud) ∩ preserved`.
+    let paperBuds := CyclicTactic.PaperAnnotation.annotateTree tree
+    let paperMsg : String :=
+      match CyclicTactic.PaperAnnotation.renderChecks
+              (paperBuds.map CyclicTactic.PaperAnnotation.checkTheorem52) with
+      | none     => "paper-faithful (Thm 5.2): PASS ✓"
+      | some msg => "paper-faithful (Thm 5.2): FAIL ✗\n" ++ msg
+    Lean.logInfoAt name m!"[cyclic_thm {name.getId}] SCT: {sctMsg}\n{orderMsg}\n{paperMsg}\nback-edge SCGs:\n{graphsStr}\n\nProofTree:\n{Build.renderTree tree}"
     -- Snapshot env-with-recursive so we can restore the recursive
     -- form if Unravel emission fails.
     let envWithRecursive ← Lean.getEnv

@@ -12,6 +12,7 @@ import CyclicTactic.Extract
 import CyclicTactic.Measure
 import CyclicTactic.ProofTree
 import CyclicTactic.InductionOrder
+import CyclicTactic.PaperAnnotation
 import CyclicTactic.Annotation
 import CyclicTactic.Reorganize
 import CyclicTactic.Unravel
