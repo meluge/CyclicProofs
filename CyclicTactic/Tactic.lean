@@ -3,6 +3,7 @@ import CyclicTactic.ProofTree
 import CyclicTactic.SizeChange
 import CyclicTactic.InductionOrder
 import CyclicTactic.PaperAnnotation
+import CyclicTactic.Theorem6
 import CyclicTactic.Build
 
 /-!
@@ -450,7 +451,11 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
               (paperBuds.map CyclicTactic.PaperAnnotation.checkTheorem52) with
       | none     => "paper-faithful (Thm 5.2): PASS ✓"
       | some msg => "paper-faithful (Thm 5.2): FAIL ✗\n" ++ msg
-    Lean.logInfoAt name m!"[cyclic_thm {name.getId}] SCT: {sctMsg}\n{orderMsg}\n{paperMsg}\nback-edge SCGs:\n{graphsStr}\n\nProofTree:\n{Build.renderTree tree}"
+    -- §6 augmented per-node info (RelAnc / Ineq / Hyp / cov). Diagnostic
+    -- only — the Theorem 6.1 emission itself is not yet wired in.
+    let augMap := CyclicTactic.Theorem6.computeAug tree
+    let augMsg := CyclicTactic.Theorem6.renderAug augMap
+    Lean.logInfoAt name m!"[cyclic_thm {name.getId}] SCT: {sctMsg}\n{orderMsg}\n{paperMsg}\nback-edge SCGs:\n{graphsStr}\n\nProofTree:\n{Build.renderTree tree}\n\n§6 per-node info (RelAnc/Ineq/Hyp):\n{augMsg}"
     -- Snapshot env-with-recursive so we can restore the recursive
     -- form if Unravel emission fails.
     let envWithRecursive ← Lean.getEnv

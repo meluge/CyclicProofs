@@ -75,12 +75,26 @@ structure NodeAnnot where
       Together with the chain of substitutions on the path, this lets
       callers recover which Lean-level variable carries the name. -/
   varOf  : List (Name × Nat)
-  /-- Names reset *on the step that produced this node*. Empty at the
-      root. -/
-  reset  : List Name
+  /-- Reset events at this node, paired with the covering names. The
+      first element of each pair is what `Reset(n_i)` contains in the
+      paper (the older, surviving name). The second is the *cover* —
+      the younger name that uniformly covered the older one immediately
+      before the reset, which Def 6.1 names `cov(n_k)`. The cover gets
+      gc'd by the reset operation but is still meaningful for emission
+      (it identifies a strict ancestor of the progressing variable). -/
+  resetCover : List (Name × Name)
   deriving Repr, Inhabited
 
 namespace NodeAnnot
+
+/-- The names reset at this node — `Reset(n_i)` in the paper. Derived
+    by projecting `resetCover` to its first component. -/
+def reset (a : NodeAnnot) : List Name := a.resetCover.map (·.1)
+
+/-- The cover for a reset name, if it was reset at this node. `cov(n_k)`
+    in Def 6.1 — the younger name that uniformly covered the reset
+    (older) name immediately before the reset operation. -/
+def cov? (a : NodeAnnot) (n : Name) : Option Name := a.resetCover.lookup n
 
 /-- Pretty-print a `NodeAnnot` as a multi-line block. -/
 def pp (a : NodeAnnot) : String :=
@@ -89,8 +103,9 @@ def pp (a : NodeAnnot) : String :=
       "slot " ++ toString i ++ ": " ++ Stack.pp s)
   let namesStr := "[" ++ String.intercalate ", " (a.names.map Name.pp) ++ "]"
   let resetStr :=
-    if a.reset.isEmpty then "∅"
-    else "{" ++ String.intercalate ", " (a.reset.map Name.pp) ++ "}"
+    if a.resetCover.isEmpty then "∅"
+    else "{" ++ String.intercalate ", "
+              (a.resetCover.map fun (r, c) => Name.pp r ++ "↤" ++ Name.pp c) ++ "}"
   "stacks:\n  " ++ stacksStr
     ++ "\nnames: " ++ namesStr
     ++ "\nreset: " ++ resetStr
@@ -104,7 +119,7 @@ def root (arity : Nat) : NodeAnnot :=
   { stacks := names.map ([·])
     names  := names
     varOf  := names.map fun a => (a, a)
-    reset  := [] }
+    resetCover := [] }
 
 end NodeAnnot
 
@@ -236,21 +251,24 @@ def applyReset (a : Name) (stacks : List Stack) : List Stack :=
 def gcNames (names : List Name) (stacks : List Stack) : List Name :=
   names.filter fun a => stacks.any (·.elem a)
 
-/-- Run the reset loop to fixpoint, returning (newStacks, newNames,
-    resetSet). Processes uniformly-covered names youngest-first; each
-    reset may unlock further covers, hence the loop. -/
+/-- Run the reset loop to fixpoint, returning `(newStacks, newNames,
+    resetCover)`. Processes uniformly-covered names youngest-first;
+    each reset may unlock further covers, hence the loop. The third
+    output records, per reset event, the `(reset name, covering name)`
+    pair — the cover is the younger name from `findUniformCover` that
+    triggered the reset of the older one (Def 6.1's `cov`). -/
 partial def resetLoop (names : List Name) (stacks : List Stack)
-    : List Stack × List Name × List Name :=
+    : List Stack × List Name × List (Name × Name) :=
   go names stacks []
 where
-  go (names : List Name) (stacks : List Stack) (acc : List Name)
-      : List Stack × List Name × List Name :=
+  go (names : List Name) (stacks : List Stack) (acc : List (Name × Name))
+      : List Stack × List Name × List (Name × Name) :=
     match findUniformCover names stacks with
     | none          => (stacks, names, acc)
-    | some (a, _a') =>
+    | some (a, a')  =>
       let stacks' := applyReset a stacks
       let names'  := gcNames names stacks'
-      go names' stacks' (acc ++ [a])
+      go names' stacks' (acc ++ [(a, a')])
 
 /-- One step of Def 5.1: compute child annotation from parent + edge SCG. -/
 def step (parent : NodeAnnot) (g : SCGraph) : NodeAnnot :=
@@ -274,11 +292,11 @@ def step (parent : NodeAnnot) (g : SCGraph) : NodeAnnot :=
   -- some stack.
   let gcNames0 := gcNames newNames stacks0
   -- Step 4: reset to fixpoint.
-  let (stacks', names', resets) := resetLoop gcNames0 stacks0
+  let (stacks', names', resetCover) := resetLoop gcNames0 stacks0
   { stacks := stacks'
     names  := names'
     varOf  := newVarOf.filter (fun (a, _) => names'.elem a)
-    reset  := resets }
+    resetCover := resetCover }
 
 /-! ### Self-tests on synthetic SCGs
 
