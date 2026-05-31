@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wait)",
+      "Bash(git stash *)",
+      "Bash(awk '/cyclic_thm ackTotalT/,/^info:.*existsEqT/')",
+      "Bash(awk '/cyclic_thm ackTotalT/,/cyclic_thm existsEqT/')",
+      "Bash(awk '/=== PAGE 10 ===/,/=== PAGE 14 ===/' /tmp/grotenhuis.txt)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git checkout *)",
+      "Bash(awk '/cyclic_thm zeroAddT/,/cyclic_thm addCommT/')",
+      "Bash(awk '/cyclic_thm ackTotalT/,/Unravel-emitted/')",
+      "Bash(awk '/cyclic_thm ackTotalT.*DIFFERS/,/canonical form/')",
+      "Bash(awk '/cyclic_thm existsEqT.*DIFFERS/,/canonical form/')",
+      "Bash(awk '/cyclic_thm btPredT.*DIFFERS/,/canonical form/')",
+      "Bash(awk '/cyclic_thm btPredT/,/canonical form/')",
+      "Bash(awk '/cyclic_thm btPredT.*emission/,/canonical form/')",
+      "Bash(git rm *)",
+      "Bash(echo \"EXIT=$?\")"
+    ]
+  }
+}

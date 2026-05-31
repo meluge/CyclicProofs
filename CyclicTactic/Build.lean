@@ -1,6 +1,6 @@
 import Lean
 import CyclicTactic.ProofTree
-import CyclicTactic.Unravel
+import CyclicTactic.EmitCommon
 
 /-!
 # Building a `ProofTree` from tactic-recorded events
@@ -21,7 +21,7 @@ Three main pieces:
   * `eventsToTree` — walks the event stream into a `ProofTree`, using
     source-position attribution to assign back-edges to arms.
   * `buildSortInfo` — introspects a binder type into the `SortInfo`
-    Unravel needs to emit `induction` blocks.
+    the emitter needs to render `induction`/`cases` blocks.
 -/
 
 namespace CyclicTactic
@@ -73,9 +73,9 @@ structure CyclicState where
   companions : List (String × Sequent) := []
   events : List CyclicEvent := []
   /-- Head constant of the user's goal type (e.g. `"btPred"` for
-      `btPred t n`). Passed to `Unravel.translate` as
-      `defaultSimpPred` so the emitted script uses `simp [btPred]`
-      to unfold the predicate at leaves and at branch preludes. -/
+      `btPred t n`). Passed to the emitter as `defaultSimpPred` so the
+      emitted script uses `simp [btPred]` to unfold the predicate at
+      leaves and at branch preludes. -/
   goalHeadName : Option String := none
   deriving Inhabited
 
@@ -317,14 +317,14 @@ def renderTree (t : ProofTree) : String := treeToString t 0
 
 /-! ### SortInfo construction
 
-To call `Unravel.translate`, each binder needs a `SortInfo` describing
-its inductive type + constructors. We introspect the type expression
+The script emitter needs a `SortInfo` per binder describing its
+inductive type + constructors. We introspect the type expression
 via Lean.Environment to build it. Ported from `Cyclic.ThmCmd`. -/
 
 /-- Build `CtorInfo` for one constructor of inductive `indName`. -/
 def buildCtorInfo (indName : Lean.Name) (typeArgs : Array Lean.Expr)
     (ctorName : Lean.Name)
-    : MetaM (Option Unravel.CtorInfo) := do
+    : MetaM (Option EmitCommon.CtorInfo) := do
   let env ← getEnv
   let some ctorConst := env.find? ctorName | return none
   let ctorTypeApplied : Lean.Expr := Id.run do
@@ -350,7 +350,7 @@ def buildCtorInfo (indName : Lean.Name) (typeArgs : Array Lean.Expr)
     }
 
 /-- Build `SortInfo` for a Lean type expression like `Nat` or `List Nat`. -/
-def buildSortInfo (typeExpr : Lean.Expr) : MetaM Unravel.SortInfo := do
+def buildSortInfo (typeExpr : Lean.Expr) : MetaM EmitCommon.SortInfo := do
   let typeExpr ← Lean.Meta.whnf typeExpr
   let head := typeExpr.getAppFn
   let typeArgs := typeExpr.getAppArgs
@@ -360,7 +360,7 @@ def buildSortInfo (typeExpr : Lean.Expr) : MetaM Unravel.SortInfo := do
     match env.find? indName with
     | some (.inductInfo indVal) =>
       let typeStr := (← Lean.Meta.ppExpr typeExpr).pretty
-      let mut ctors : List Unravel.CtorInfo := []
+      let mut ctors : List EmitCommon.CtorInfo := []
       for cn in indVal.ctors do
         if let some ci ← buildCtorInfo indName typeArgs cn then
           ctors := ctors ++ [ci]

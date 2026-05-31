@@ -121,7 +121,7 @@ def evalCyclic : Tactic := fun stx => do
       | none =>
         Build.exprToSequent target
     -- Extract the goal's head constant (e.g. `btPred` for
-    -- `btPred t n`) so the Unravel emission can use it as the
+    -- `btPred t n`) so the §6 emitter can use it as the
     -- defaultSimpPred — needed to unfold the predicate at leaves
     -- and inside `branch` preludes.
     let target' ← Lean.instantiateMVars target
@@ -337,7 +337,7 @@ def evalCycCases : Tactic := fun stx => do
         match arm.raw.getRange? with
         | some r => { startPos := r.start.byteIdx, endPos := r.stop.byteIdx }
         | none   => { startPos := 0, endPos := 0 }
-      -- Capture the body's source text for Unravel emission. Used as
+      -- Capture the body's source text for the §6 emitter. Used as
       -- the leaf's closeTactic when the arm has no back-edge, or as
       -- the prelude (with the back call's text replaced by `recurse`)
       -- when the arm has one. `Syntax.reprint` reconstructs the source.
@@ -394,11 +394,11 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     -- Architectural completion: `<name>` is the only declaration we
     -- ever add. We elaborate it as a recursive `def` first (so the
     -- InfoView shows real Lean goals during writing AND we capture
-    -- cyclic events from the firing tactics). If the Unravel emission
+    -- cyclic events from the firing tactics). If the §6 emission
     -- subsequently elaborates cleanly, we ROLL BACK env to before the
     -- recursive elaboration and replace `<name>` with the canonical
-    -- Unravel form. If Unravel fails, the recursive form stands as the
-    -- fallback. Either way: one name, one declaration.
+    -- Theorem 6.1 form. If that fails, the recursive form stands as
+    -- the fallback. Either way: one name, one declaration.
     --
     -- `back R {σ}` issues `exact <name> σ` — recursive call to the
     -- user's name. This works because Lean's `def` allows the body to
@@ -457,12 +457,12 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     let augMsg := CyclicTactic.Theorem6.renderAug augMap
     Lean.logInfoAt name m!"[cyclic_thm {name.getId}] SCT: {sctMsg}\n{orderMsg}\n{paperMsg}\nback-edge SCGs:\n{graphsStr}\n\nProofTree:\n{Build.renderTree tree}\n\n§6 per-node info (RelAnc/Ineq/Hyp):\n{augMsg}"
     -- Snapshot env-with-recursive so we can restore the recursive
-    -- form if Unravel emission fails.
+    -- form if §6 emission fails.
     let envWithRecursive ← Lean.getEnv
-    -- Phase E: try Unravel canonical. On success, we roll back env to
-    -- BEFORE the recursive elaboration and commit Unravel as <name>.
-    -- On failure, we restore envWithRecursive so the recursive form
-    -- stands as the user-facing declaration.
+    -- Phase E: try Theorem 6.1 canonical emission. On success, we roll
+    -- back env to BEFORE the recursive elaboration and commit the §6
+    -- script as <name>. On failure, we restore envWithRecursive so
+    -- the recursive form stands as the user-facing declaration.
     if sctOk then
       let varSorts ← Lean.Elab.Command.liftTermElabM <| do
         binderTypes.mapM fun (bname, btStx) => do
@@ -470,17 +470,19 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
           let si ← Build.buildSortInfo typeExpr
           return (bname.toString, si)
       let goalTypeStr := type.raw.reprint.getD "<unknown-goal>"
-      let script := Unravel.translate
+      -- Canonical emitter: Grotenhuis-Otten Theorem 6.1 (§6). Drives
+      -- the declaration that gets committed as <name>.
+      let script := CyclicTactic.Theorem6.Emit.translate
         (defaultSimpPred := st.goalHeadName)
         (goalType := goalTypeStr)
         (thmName := name.getId.toString)
         (varSorts := varSorts)
         tree
-      Lean.logInfoAt name m!"[cyclic_thm {name.getId}] Unravel-emitted script:\n{script}"
+      Lean.logInfoAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 emitted script:\n{script}"
       match Lean.Parser.runParserCategory envWithRecursive `command script with
       | .ok cmdStx =>
-        -- Roll back env to before the recursive form, then try
-        -- Unravel. Snapshot message log so we can restore on failure.
+        -- Roll back env to before the recursive form, then try the §6
+        -- emission. Snapshot message log so we can restore on failure.
         Lean.setEnv envBefore
         let beforeMsgs := (← getThe Lean.Elab.Command.State).messages
         try Lean.Elab.Command.elabCommand cmdStx catch _ => pure ()
@@ -493,15 +495,15 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
             | none   => true
           | none    => false
         if hasGoodValue then
-          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: Unravel emission ✓"
+          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: Theorem 6.1 emission ✓"
         else
-          -- Restore env-with-recursive (Unravel produced sorries) and
-          -- drop any messages from the failed canonical attempt.
+          -- Restore env-with-recursive (§6 emission produced sorries)
+          -- and drop messages from the failed canonical attempt.
           Lean.setEnv envWithRecursive
           modifyThe Lean.Elab.Command.State fun s => { s with messages := beforeMsgs }
-          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] Unravel emission produced sorries; keeping recursive form as `{name.getId}`."
+          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 emission produced sorries; keeping recursive form as `{name.getId}`."
       | .error msg =>
-        Lean.logWarningAt name m!"[cyclic_thm {name.getId}] Unravel script parse failed ({msg}); keeping recursive form."
+        Lean.logWarningAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 script parse failed ({msg}); keeping recursive form."
     setCurrentThm none
   | _ => Lean.throwError "cyclic_thm: malformed syntax"
 
@@ -590,6 +592,49 @@ syntax (name := cyclicMutualCmd)
     ("thm " ident cycThmBinder+ " : " term " by " Lean.Parser.Tactic.tacticSeq)+
   "end_mutual"
   : command
+
+/-- Demultiplex a chronologically-ordered event stream from a
+    `cyclic_mutual` block into per-entry segments. Uses the
+    companion → ThmContext table to attribute each `.companion lbl _`
+    event to a specific theorem; the next `.companion` that targets a
+    different theorem starts a new segment.
+
+    Entries appear in the order their first companion is registered
+    (which matches source order: entry 1's `cyclic R_1` fires before
+    entry 2's `cyclic R_2`). Events preceding the first companion are
+    dropped (defensive — shouldn't happen for well-formed input). -/
+def demuxMutualEvents
+    (events : List CyclicEvent)
+    (companionTargets : List (String × ThmContext))
+    : List (Lean.Name × List CyclicEvent) := Id.run do
+  let mut result : List (Lean.Name × List CyclicEvent) := []
+  let mut currentThm : Option Lean.Name := none
+  let mut currentEvents : List CyclicEvent := []
+  for e in events do
+    match e with
+    | .companion lbl _ =>
+      let target? := companionTargets.find? (·.1 == lbl)
+      match target? with
+      | some (_, ctx) =>
+        let sameThm := match currentThm with
+          | some t => t == ctx.thmName
+          | none   => false
+        if sameThm then
+          currentEvents := currentEvents ++ [e]
+        else
+          if let some prevThm := currentThm then
+            result := result ++ [(prevThm, currentEvents)]
+          currentThm := some ctx.thmName
+          currentEvents := [e]
+      | none =>
+        if currentThm.isSome then
+          currentEvents := currentEvents ++ [e]
+    | _ =>
+      if currentThm.isSome then
+        currentEvents := currentEvents ++ [e]
+  if let some prevThm := currentThm then
+    result := result ++ [(prevThm, currentEvents)]
+  return result
 
 @[command_elab cyclicMutualCmd]
 def elabCyclicMutual : Lean.Elab.Command.CommandElab := fun stx => do
@@ -697,25 +742,154 @@ def elabCyclicMutual : Lean.Elab.Command.CommandElab := fun stx => do
     entryTexts := entryTexts.push
       s!"def {nameStr} {bindersStr} : {typeStr} := by\n{tacsStr}"
   let mutStr := "mutual\n" ++ String.intercalate "\n" entryTexts.toList ++ "\nend"
+  -- Snapshot env *before* the recursive mutual elaborates, so we can
+  -- roll back and re-elaborate as the §6-canonical form if it
+  -- elaborates cleanly. Mirrors the single `cyclic_thm` flow.
+  let envBefore ← Lean.getEnv
   match Lean.Parser.runParserCategory (← Lean.getEnv) `command mutStr with
   | .ok cmdStx => Lean.Elab.Command.elabCommand cmdStx
   | .error msg =>
     Lean.throwError s!"cyclic_mutual: failed to parse synthesised mutual \
       block:\n{msg}\n\nblock was:\n{mutStr}"
+  -- Env after recursive mutual: kept as fallback if §6 emission fails.
+  let envWithRecursive ← Lean.getEnv
   -- Per-theorem event diagnostics. The single event log holds events
   -- from all entries interleaved by elaboration order; render the
   -- whole stream so the user can see the recorded structure.
   let st ← getCyclicState
   let compStr := String.intercalate ", " (st.companions.map (·.1))
-  let mutCompStr ← do
-    let m ← mutualCompanionTargetRef.get
-    pure <| String.intercalate ", "
-      (m.map fun (l, c) => s!"{l}→{c.thmName}")
+  let companionTargets ← mutualCompanionTargetRef.get
+  let mutCompStr := String.intercalate ", "
+    (companionTargets.map fun (l, c) => s!"{l}→{c.thmName}")
   Lean.logInfoAt nameStxs[0]!
     m!"[cyclic_mutual] entries: {thmCtxs.map (·.thmName.toString)}\n\
        companions in scope: [{compStr}]\n\
        companion → target: [{mutCompStr}]\n\
        events recorded: {st.events.length}"
+  -- Demux events by entry and surface the per-entry ProofTree as a
+  -- diagnostic. §6 augmentation (computeAug / annotateTree) hangs on
+  -- mutual trees when buds reference out-of-tree ancestors — the
+  -- Lemma 5.9 unfolding fixpoint never converges for cross-theorem
+  -- cycles. Mutual emission doesn't need aug data anyway, since all
+  -- buds emit as `exact <sibling-thm-name> <σ-applied args>` (the
+  -- sibling theorem is the IH provided by Lean's mutual termination
+  -- check). See step-3 mutual emitter for the routing.
+  let chronoEvents := st.events.reverse
+  let perEntry := demuxMutualEvents chronoEvents companionTargets
+  -- First pass: build per-entry diagnostic + collect entries for the
+  -- §6 mutual emitter.
+  let mut mutualEntries : List CyclicTactic.Theorem6.Emit.MutualEntry := []
+  for (thmName, evs) in perEntry do
+    let tree := Build.eventsToTree evs
+    let nameIdx? := thmCtxs.zipIdx.find? (·.1.thmName == thmName)
+    let (posStx, entryIdx) : Lean.Syntax × Nat := match nameIdx? with
+      | some (_, i) => (nameStxs[i]!, i)
+      | none        => (nameStxs[0]!, 0)
+    Lean.logInfoAt posStx
+      m!"[cyclic_mutual.{thmName}] events: {evs.length}\n\
+         ProofTree:\n{Build.renderTree tree}"
+    -- Build the MutualEntry for §6 emission. Binder names + raw type
+    -- strings come from the syntax directly (no `elabType`, which
+    -- fails on dependent types like `(h : Od n)` outside the right
+    -- elaboration context). SortInfo is recovered by looking up the
+    -- type's head identifier in the env — sufficient for `cases h
+    -- with` since constructors don't depend on the type's indices.
+    let (_, bracketedBinders, typeStx, _) := entries[entryIdx]!
+    let goalTypeStr := typeStx.raw.reprint.getD "<unknown>"
+    let mut bindersWithTypes : List (String × String) := []
+    let mut varSorts : List (String × CyclicTactic.EmitCommon.SortInfo) := []
+    for h : i in [:bracketedBinders.size] do
+      let bb := bracketedBinders[i]
+      match bb.raw with
+      | `(Lean.Parser.Term.bracketedBinderF| ($vs:ident* : $bt:term)) =>
+        let typeStr := bt.raw.reprint.getD "<?>"
+        -- Resolve the type's head ident to an inductive name and
+        -- build SortInfo from its constructors. Falls through to
+        -- "no sort info" if the head isn't an inductive — the
+        -- emitter handles that with a `sorry` fallback.
+        let headIdent? : Option Lean.Name := Id.run do
+          let mut cur := bt.raw
+          while cur.getKind == ``Lean.Parser.Term.app do
+            cur := cur[0]
+          match cur with
+          | .ident _ _ n _ => return some n
+          | _              => return none
+        let env ← Lean.getEnv
+        let resolve : Lean.Name → Option Lean.ConstantInfo :=
+          let rec go (n : Lean.Name) : Option Lean.ConstantInfo :=
+            match env.find? n with
+            | some ci => some ci
+            | none => match n with
+              | .str p _ => go p
+              | _        => none
+          go
+        let si? : Option CyclicTactic.EmitCommon.SortInfo :=
+          match headIdent?.bind resolve with
+          | some (.inductInfo indVal) =>
+            let ctorsCI : List CyclicTactic.EmitCommon.CtorInfo :=
+              indVal.ctors.foldl (init := []) fun acc ctorName =>
+                match env.find? ctorName with
+                | some (.ctorInfo cv) =>
+                  let shortName := ctorName.toString.splitOn "." |>.getLast!
+                  acc ++ [{ shortName := shortName
+                            fullName  := ctorName.toString
+                            recArgs   := []
+                            totalArgs := cv.numFields }]
+                | _ => acc
+            some { typeStr := typeStr, ctors := ctorsCI }
+          | _ => none
+        for v in vs do
+          bindersWithTypes := bindersWithTypes ++ [(v.getId.toString, typeStr)]
+          if let some si := si? then
+            varSorts := varSorts ++ [(v.getId.toString, si)]
+      | _ => pure ()
+    let entry : CyclicTactic.Theorem6.Emit.MutualEntry :=
+      { thmName  := thmName.toString
+        binders  := bindersWithTypes
+        goalType := goalTypeStr
+        tree     := tree
+        varSorts := varSorts }
+    mutualEntries := mutualEntries ++ [entry]
+  -- Build the §6 companion-map: label → (sibling-thm-name, binder-vars).
+  -- Dedup labels (the table is double-populated by the syntactic
+  -- pre-scan + the live `cyclic <label>` calls).
+  let companionMap : List (String × String × List String) :=
+    companionTargets.foldl (init := []) fun acc (lbl, ctx) =>
+      if acc.any (·.1 == lbl) then acc
+      else acc ++ [(lbl, ctx.thmName.toString, ctx.binders.map (·.toString))]
+  let mutualScript := CyclicTactic.Theorem6.Emit.translateMutual
+    (defaultSimpPred := st.goalHeadName)
+    mutualEntries companionMap
+  Lean.logInfoAt nameStxs[0]!
+    m!"[cyclic_mutual] §6 emitted script:\n{mutualScript}"
+  -- Phase E: try Theorem 6.1 canonical emission. Parse the §6 script
+  -- and, if elaboration produces sorry-free declarations for every
+  -- entry, roll back to `envBefore` and commit the §6 form as the
+  -- canonical declarations. On failure, restore `envWithRecursive`.
+  match Lean.Parser.runParserCategory envWithRecursive `command mutualScript with
+  | .ok cmdStx =>
+    Lean.setEnv envBefore
+    let beforeMsgs := (← getThe Lean.Elab.Command.State).messages
+    try Lean.Elab.Command.elabCommand cmdStx catch _ => pure ()
+    let envAfter ← Lean.getEnv
+    let allGood : Bool := thmCtxs.all fun ctx =>
+      match envAfter.find? ctx.thmName with
+      | some di =>
+        match di.value? with
+        | some v => !v.hasSorry
+        | none   => true
+      | none    => false
+    if allGood then
+      Lean.logInfoAt nameStxs[0]!
+        m!"[cyclic_mutual] canonical form: Theorem 6.1 emission ✓"
+    else
+      Lean.setEnv envWithRecursive
+      modifyThe Lean.Elab.Command.State fun s => { s with messages := beforeMsgs }
+      Lean.logWarningAt nameStxs[0]!
+        m!"[cyclic_mutual] Theorem 6.1 emission produced sorries; keeping recursive form."
+  | .error msg =>
+    Lean.logWarningAt nameStxs[0]!
+      m!"[cyclic_mutual] Theorem 6.1 script parse failed ({msg}); keeping recursive form."
   -- Done — clean up.
   setCurrentThm none
   resetMutualState

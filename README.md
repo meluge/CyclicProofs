@@ -1,6 +1,6 @@
 # cyclic
 
-A Lean 4 implementation of cyclic-proof unravelling. Cyclic proofs (Brotherston 2006) are validated for termination via the size-change principle (Lee, Jones, Ben-Amram 2001) and translated into kernel-checked Lean theorems — either as nested `induction` (Sprenger-Dam FoSSaCS 2003 tradition) or as `WellFounded.fix` over a synthesised lex/sum measure (Lee TOPLAS 2009 / Thiemann-Giesl 2003 family). Soundness lives in Lean's kernel: every emitted declaration is rechecked, so an unraveller bug breaks the build, not the theorem.
+A Lean 4 implementation of cyclic-proof unravelling. Cyclic proofs (Brotherston 2006) are validated for termination via the size-change principle (Lee, Jones, Ben-Amram 2001) and translated into kernel-checked Lean theorems by a paper-faithful implementation of Grotenhuis-Otten Theorem 6.1 (arXiv 2602.12054 §6). The cyclic structure is rewritten as nested `induction`/`cases` blocks with explicit IH applications. Soundness lives in Lean's kernel: every emitted declaration is rechecked, so an unraveller bug breaks the build, not the theorem.
 
 The user writes cyclic proofs as **real Lean tactics**. The InfoView shows real goals at every cursor position; cyclic structure is recorded into a side-channel `ProofTree` for SCT validation and structural emission. Three primitive tactics:
 
@@ -63,7 +63,7 @@ cyclic_mutual
 end_mutual
 ```
 
-`cyclic_mutual` desugars to a `mutual def … end` block. Each entry registers its own companion; `back R_E` from inside one entry resolves to the *other* entry's recursive call via a pre-registered companion-target table. Soundness comes from Lean's mutual-recursion termination check.
+`cyclic_mutual` desugars to a `mutual def … end` block. Each entry registers its own companion; `back R_E` from inside one entry resolves to the *other* entry's recursive call via a pre-registered companion-target table. After the recursive form elaborates, the §6 emitter rewrites the block as `mutual def od_is_nlike … := by cases h with … exact ev_is_nlike k h' end` — each cross-companion bud becomes a direct sibling-theorem call. Soundness comes from Lean's mutual-recursion termination check.
 
 ## Pipeline
 
@@ -78,19 +78,23 @@ end_mutual
         │
         ▼  SCGraph.checkMultiSCT (composition closure + idempotent check)
         │
-        ▼  Annotation
-  per-back-edge progressing name + global induction order
+        ▼  PaperAnnotation (Grotenhuis-Otten Def 5.1 + Lemma 5.9)
+  per-node Stack/Name/Reset annotation; Theorem 5.2 PASS / FAIL
         │
-        ▼  dispatcher: try structural, else reorganise, else WF
-  Unravel.translate                 Unravel.translateWF
-  nested `induction generalizing`   def + termination_by
-  back-edges → auto-IH              WellFounded.fix on measure
+        ▼  Theorem6 (RelAnc / Ineq / Hyp / cov + σ per Lemma 6.4)
+  per-node §6 augmentation
         │
-        ▼  Lean.elabCommand
-  kernel-checked theorem
+        ▼  Theorem6.Emit.translate   /   Theorem6.Emit.translateMutual
+  nested `induction generalizing`     `mutual def … end` block
+  for sprouts; `cases` otherwise;     case-splits in each entry;
+  buds → `exact ih_<var> args`        cross-theorem buds →
+                                      `exact <sibling-thm> args`
+        │
+        ▼  Lean.elabCommand (env rollback + canonical replace)
+  kernel-checked theorem (single) or mutual def block
 ```
 
-The dispatcher first checks `canStructural` on the user's tree. If the user's case-split nesting doesn't match the synthesised induction order, `Reorganize` bubble-sorts case-splits (Sprenger-Dam Theorem 5 / Wehr Fact 3.4.1, restricted to uniform 2-level swaps with descending-variable back-edge retargeting). If reorganisation can't help, the WF emitter takes over.
+A case-split in the §6 emission becomes `induction <var> generalizing <rest> with` only if the node is a *sprout* (per Theorem 6.1: a node whose `Hyp(n_k)` extends the parent's); otherwise it emits as a plain `cases <var> with`, since no descendant bud needs an IH from this split. Cross-theorem buds in `cyclic_mutual` are routed via a companion-target table to the sibling theorem's name, relying on Lean's mutual-recursion termination check for soundness.
 
 ## Module layout
 
@@ -103,12 +107,12 @@ The dispatcher first checks `canStructural` on the user's tree. If the user's ca
 | `Annotation.lean` | Per-back-edge progressing name + global induction order. |
 | `InductionOrder.lean` | Wehr 3.2.4-flavoured induction-order finder. |
 | `Reorganize.lean` | Bubble-sort case-splits + descending-var back-edge retargeting. |
-| `Unravel.lean` | `translate` (structural) + `translateWF` (well-founded). |
-| `Tactic.lean` | The `cyclic`, `cyc_cases`, `back` tactics; `cyclic_thm`, `cyclic_mutual` commands. |
-| `Build.lean` | Event recorder + `ProofTree` builder + `Expr → SubjectTerm`. |
-| `Examples/` | Worked examples — Smoke, Probe, drp, CyclistComparison. |
-
-`PIPELINE.md` walks the flow end-to-end on a multi-recursive example.
+| `PaperAnnotation.lean` | Grotenhuis-Otten Def 5.1 (Stack/Name/Reset step) + Lemma 5.9 (unfolding fixpoint) + Theorem 5.2 checker. |
+| `Theorem6.lean` | Per-node §6 augmentation (RelAnc / Ineq / Hyp / cov + σ) and `Emit.translate` / `Emit.translateMutual` — the Theorem 6.1 emitter. |
+| `EmitCommon.lean` | Shared script-emission utilities — `SortInfo`, `CtorInfo`, `termToLean`, `patToInductionCase`, indentation helpers. |
+| `Tactic.lean` | The `cyclic`, `cyc_cases`, `back` tactics; `cyclic_thm`, `cyclic_mutual` commands with §6 canonical-form replacement. |
+| `Build.lean` | Event recorder + `ProofTree` builder + `Expr → SubjectTerm` + `buildSortInfo`. |
+| `Examples/` | Worked examples — Smoke, Probe, drp, MutualSmoke, CyclistComparison. |
 
 ## Comparison with Cyclist (Brotherston-Gorogiannis-Petersen 2012)
 
@@ -129,10 +133,11 @@ Cyclist fails on 10/11 because its first-order proof search applies sequent rule
 - **DAG-shaped proofs.** The paper allows arbitrary cycles in the proof graph; ours is tree-shaped (back-edges target ancestors).
 - **Sequent rules that reindex occurrences** (weakening, contraction, exchange) break position-based occurrence matching. We work at Lean's term-goal level. Cut is expressible via `have`.
 - **Pattern syntax.** DSL patterns are restricted to `[]`, numeric literals, `x :: xs`, and `<ctor> <var> …`. No nested patterns.
-- **Per-call descent witnesses** are delegated to Lean's `decreasing_by`. The reset annotation surfaces *which* position should descend (in diagnostics and in `-- prog = aN` comments in WF emission), but the proof of decrease is reconstructed by Lean.
-- **Reorganisation** handles uniform 2-level swaps. Non-uniform branches fall through to WF.
-- **WF emission of `have` / `exists`** isn't implemented (those steps emit `sorry` on the WF path). In practice this isn't a real limitation because such proofs route through structural emission.
+- **Per-call descent witnesses** are delegated to Lean's structural-recursion / mutual-termination check. The §6 annotation surfaces *which* position should descend (in `[cyclic_thm]` diagnostics), but the proof of decrease is reconstructed by Lean.
+- **Reorganisation** handles uniform 2-level swaps. Non-uniform branches need to be written in the right order by hand.
+- **`cyclic_mutual` within-entry cycles.** The §6 mutual emitter assumes all buds are cross-theorem (the bud's `ancestor` resolves to a sibling entry's companion, not a node in the same tree). Within-entry back-edges aren't yet supported — `computeAug` calls `annotateTree`'s Lemma 5.9 unfolding, which doesn't terminate on cross-theorem ancestors, so mutual blocks skip §6 augmentation. The omitted aug is unused for cross-theorem-only proofs (Lean's mutual-recursion check provides termination), but a mutual block with within-tree cycles would need the augmentation re-enabled with a cross-theorem guard.
 - **SCT across `cyclic_mutual` blocks** isn't wired up yet — the MVP relies on Lean's mutual-recursion termination check. Adding it is local follow-up work (per-entry tree construction → `(entry-id, position)`-vertex multi-graph SCT).
+- **Multi-companion within one theorem** (multiple `cyclic R1` / `cyclic R2` declarations in a single `cyclic_thm` body, with buds picking which) isn't supported. The §6 data model bakes in companion = root.
 - **The unraveller itself is not formally verified.** Soundness comes from Lean's kernel rechecking every emitted declaration; the worst case of an unraveller bug is a broken build, not an unsound theorem.
 
 ## Building
@@ -151,8 +156,18 @@ The honest algorithmic ancestry, per component:
 - **SCT validation** (`SizeChange.checkMultiSCT`) — Lee, Jones, Ben-Amram, *POPL 2001*. Composition closure + idempotent strict-self-loop check.
 - **Cyclic-proof structure with per-occurrence traces** (`ProofTree`, `Extract`) — Brotherston, *PhD 2006*. Practical implementation precedent: Cyclist (Brotherston-Gorogiannis-Petersen, *PLPR 2012*).
 - **Measure synthesis** (`Measure`) — in the spirit of Thiemann-Giesl (RTA 2003), characterised by Lee (TOPLAS 2009). We implement the easy quadrant (lex / lex-subset / sum / greedy-closure); Lee's full characterisation (max/min over lex tuples, polynomial measures) is not.
-- **Structural translation** (`Unravel.translate`, nested `induction generalizing`) — Sprenger, Dam, *FoSSaCS 2003*. The same pattern reappears in Wehr (*PhD 2025*) and the Grotenhuis-Otten / Leigh-Wehr generalisation to abstract CPS.
+- **Stack/Name/Reset annotation** (`PaperAnnotation`) — Grotenhuis-Otten / Leigh-Wehr Definition 5.1 (per-node Stack/Name/Reset step), Lemma 5.4 (`2^m + m` alphabet bound), Lemma 5.9 (key-based unfolding fixpoint), and Theorem 5.2 verification. Per-back-edge progressing-name selection follows the paper's `Reset ∩ preserved` rule.
+- **Paper-faithful emission** (`Theorem6.Emit.translate` / `translateMutual`) — Grotenhuis-Otten Lemmas 6.2–6.4 + Theorem 6.1. Sprout-driven `induction` placement (Lemma 6.3's rule selection: `induction` at sprouts, `cases` otherwise), σ from Lemma 6.4 for IH applications, per-bud `RelAnc / Ineq / Hyp / cov` data, mutual-block emission with cross-theorem buds. Replaces the earlier Sprenger-Dam-flavoured `Unravel.translate` we shipped before §6.
 - **Tree reorganisation** (`Reorganize.swapAdjacent`, `reorder`) — Sprenger-Dam Theorem 5 / Wehr Fact 3.4.1, restricted to uniform 2-level swaps (no sub-proof duplication).
-- **Annotation pass** (`Annotation`) — coarse SCT-closure reduction of Wehr's stack-controlled / reset-proof annotations (§§3.3–3.4). *Not* Wehr's Theorem 3.2.4 algorithm.
+- **Heuristic annotation pass** (`Annotation`) — coarse SCT-closure reduction of Wehr's stack-controlled / reset-proof annotations (§§3.3–3.4). *Not* Wehr's Theorem 3.2.4 algorithm. Carried alongside the paper-faithful `PaperAnnotation` for diagnostic comparison.
 
-What we *don't* implement despite reading the papers: Wehr Theorem 3.2.4 (bud-companion SCC algorithm), Sprenger-Dam Theorem 5 in full (general unfolding with sub-proof duplication), Grotenhuis-Otten / Leigh-Wehr's abstract-CPS framework, Lee 2009's full ranking-function characterisation, and Berardi-Tatsuta 2017 / Simpson 2017's HA-internal well-foundedness construction. PDFs in repo root: `cyclicprooftheory.pdf` (Wehr 2025), `2602.12054v1.pdf` (Grotenhuis-Otten / Leigh-Wehr), `cyclist.pdf` (Brotherston et al. 2012), `1498926.1498928.pdf` (Lee 2009).
+What we *don't* implement despite reading the papers: Wehr Theorem 3.2.4 (bud-companion SCC algorithm), Sprenger-Dam Theorem 5 in full (general unfolding with sub-proof duplication), Grotenhuis-Otten Proposition 5.8 (true paper-faithful induction-order verification — we delegate to Lean's structural-recursion / mutual-termination check), Lee 2009's full ranking-function characterisation, and Berardi-Tatsuta 2017 / Simpson 2017's HA-internal well-foundedness construction.
+
+PDFs in [`papers/`](papers/):
+
+- [`Wehr-2025-cyclic-proof-theory-phd-thesis.pdf`](papers/Wehr-2025-cyclic-proof-theory-phd-thesis.pdf) — Dominik Wehr, *Cyclic Proof Theory*, PhD thesis 2025.
+- [`Grotenhuis-Otten-2026-unravelling-abstract-cyclic-proofs.pdf`](papers/Grotenhuis-Otten-2026-unravelling-abstract-cyclic-proofs.pdf) — Lide Grotenhuis & Daniël Otten, *Unravelling Abstract Cyclic Proofs into Proofs by Induction*, arXiv 2602.12054.
+- [`Brotherston-Gorogiannis-Petersen-2012-cyclist-aplas.pdf`](papers/Brotherston-Gorogiannis-Petersen-2012-cyclist-aplas.pdf) — *Cyclist*, APLAS 2012.
+- [`Lee-2009-size-change-toplas.pdf`](papers/Lee-2009-size-change-toplas.pdf) — Lee, TOPLAS 2009 — full size-change ranking-function characterisation.
+- [`Berardi-Tatsuta-2017-intuitionistic-cyclic-proofs.pdf`](papers/Berardi-Tatsuta-2017-intuitionistic-cyclic-proofs.pdf) — Berardi & Tatsuta on the Brotherston-Simpson conjecture for intuitionistic logic.
+- [`Brotherston-Distefano-Petersen-2011-automated-cyclic-entailment-cade.pdf`](papers/Brotherston-Distefano-Petersen-2011-automated-cyclic-entailment-cade.pdf) — *Automated cyclic entailment proofs in separation logic*, CADE 2011.

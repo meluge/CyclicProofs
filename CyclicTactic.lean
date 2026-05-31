@@ -16,11 +16,12 @@ import CyclicTactic.PaperAnnotation
 import CyclicTactic.Theorem6
 import CyclicTactic.Annotation
 import CyclicTactic.Reorganize
-import CyclicTactic.Unravel
+import CyclicTactic.EmitCommon
 import CyclicTactic.Build
 import CyclicTactic.Tactic
 import CyclicTactic.Examples.Smoke
 import CyclicTactic.Examples.Probe
 import CyclicTactic.Examples.Probe2
 import CyclicTactic.Examples.drp
+import CyclicTactic.Examples.MutualSmoke
 import CyclicTactic.Examples.CyclistComparison
