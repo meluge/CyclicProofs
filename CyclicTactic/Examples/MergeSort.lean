@@ -13,13 +13,13 @@ also a deliberate stress test of the system's limits.
 ## Plan
 
 1. Define `split`, `merge`, `mergeSort` over `List Nat`.
-2. Prove `length (mergeSort xs) = length xs` as a `cyclic_thm`.
-3. Define `sorted` inductively; prove `sorted (mergeSort xs)`.
-4. Compare against the structurally-recursive *insertion sort*
-   variant in the same file to see what the system handles for free
-   vs. what needs WF support.
+2. Prove `length (merge xs ys) = length xs + length ys` as a `cyclic_thm`
+   — a lex-only recursion that exercises the WF emission backend.
 
-If a step fails, that's data — note the failure, move on.
+`mergeSort` itself is defined for context but its `decreasing_by` is left
+as `sorry` (the split-shortening lemmas are not the focus here); it is not
+referenced by the property we prove. If a step fails, that's data — note
+the failure, move on.
 -/
 
 namespace MergeSort
@@ -49,7 +49,8 @@ def merge : List Nat → List Nat → List Nat
 /-! ### `mergeSort` — recursive split + merge
 
 The classic non-structural recursion. Needs `termination_by` to convince
-Lean that splits shorten the list. -/
+Lean that splits shorten the list; the split-shortening lemma is left as
+`sorry` since `mergeSort` is not exercised by the property below. -/
 
 def mergeSort : List Nat → List Nat
   | []      => []
@@ -64,10 +65,14 @@ def mergeSort : List Nat → List Nat
 
 /-! ## Property 1: `length (merge xs ys) = length xs + length ys`
 
-The recursion in `merge` is lex on `(xs.length, ys.length)` —
-when `x ≤ y` we descend on `xs`, otherwise on `ys`. Neither arg
-is structurally smaller across both cases. This is the
-first test of whether `cyclic_thm` can express lex-only recursion. -/
+The recursion in `merge` is lex on `(xs.length, ys.length)` — when
+`x ≤ y` we descend on `xs`, otherwise on `ys`. Neither argument is
+structurally smaller across both cases, so structural induction cannot
+witness termination. Written with `cyc_by_cases` (a recorded `by_cases`)
+so the back-edges inside the decidable split `x ≤ y` are visible to the
+event recorder; the dispatcher then detects no single-variable order,
+synthesises the lex measure `(xs.length, ys.length)`, and emits a
+kernel-checked `def … termination_by … decreasing_by`. -/
 
 cyclic_thm merge_length (xs : List Nat) (ys : List Nat) :
     (merge xs ys).length = xs.length + ys.length by
@@ -78,11 +83,13 @@ cyclic_thm merge_length (xs : List Nat) (ys : List Nat) :
     cyc_cases ys with
     | nil => simp [merge]
     | cons y ys' =>
-      by_cases hle : x ≤ y
-      · -- x ≤ y: descend on xs
+      cyc_by_cases hle : x ≤ y with
+      | pos =>
+        -- x ≤ y: descend on xs
         simp [merge, hle]
         back R {xs := xs', ys := y :: ys'}
-      · -- x > y: descend on ys
+      | neg =>
+        -- x > y: descend on ys
         simp [merge, hle]
         back R {xs := x :: xs', ys := ys'}
 

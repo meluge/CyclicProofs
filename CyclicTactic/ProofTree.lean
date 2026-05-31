@@ -181,6 +181,18 @@ inductive ProofTree where
       with the extra binding `var ↦ pat` composed into the path substitution. -/
   | caseSplit (label : String) (seq : Sequent) (var : String)
               (cases : List (SubjectTerm × ProofTree))
+  /-- A *decidable* case-split (`by_cases h : P`) on a proposition `prop`,
+      introducing hypothesis `h`. Unlike `caseSplit`, this does NOT refine
+      a root-sequent variable — it branches on a `Decidable` proposition —
+      so trace extraction descends into both arms with the path
+      substitution UNCHANGED. This is what makes back-edges inside an
+      `if`/`by_cases` (e.g. merge-sort's `merge`, which descends on `xs`
+      in the `x ≤ y` arm and on `ys` otherwise) visible to the recorder
+      with their per-arm size-change graphs. `posArm` is the `h : P` arm,
+      `negArm` the `h : ¬P` arm. Emitted as `by_cases h : prop` with the
+      arms as `·` bullets. -/
+  | dCaseSplit (label : String) (seq : Sequent) (hyp : String) (prop : String)
+               (posArm negArm : ProofTree)
   /-- A back-edge: the current sequent is an instance of the ancestor's
       sequent under `σ` (which instantiates the ancestor's free variables). -/
   | back (label : String) (seq : Sequent) (ancestor : String) (σ : Subst)
@@ -221,6 +233,7 @@ def label : ProofTree → String
   | .identity lbl _ => lbl
   | .node lbl _ _ _ => lbl
   | .caseSplit lbl _ _ _ => lbl
+  | .dCaseSplit lbl _ _ _ _ _ => lbl
   | .back lbl _ _ _ _ => lbl
   | .haveStep lbl _ _ _ _ _ => lbl
   | .existsStep lbl _ _ _ => lbl
@@ -230,6 +243,7 @@ def sequent : ProofTree → Sequent
   | .identity _ s => s
   | .node _ s _ _ => s
   | .caseSplit _ s _ _ => s
+  | .dCaseSplit _ s _ _ _ _ => s
   | .back _ s _ _ _ => s
   | .haveStep _ s _ _ _ _ => s
   | .existsStep _ s _ _ => s
@@ -240,6 +254,7 @@ partial def backEdges : ProofTree → List (String × String)
   | .identity _ _ => []
   | .node _ _ _ cs => cs.flatMap backEdges
   | .caseSplit _ _ _ cases => cases.flatMap fun (_, t) => backEdges t
+  | .dCaseSplit _ _ _ _ pos neg => backEdges pos ++ backEdges neg
   | .back lbl _ anc _ _ => [(lbl, anc)]
   | .haveStep _ _ _ _ _ cont => backEdges cont
   | .existsStep _ _ _ cont => backEdges cont
@@ -345,6 +360,13 @@ partial def extractTraceSCGsAux
       -- Extend every ancestor's path substitution with `var ↦ pat`.
       let extended := ancestors'.map fun (l, s, σ) => (l, s, (var, pat) :: σ)
       extractTraceSCGsAux extended sub
+  | .dCaseSplit lbl seq _ _ pos neg =>
+    -- A decidable split refines no root variable: descend into both arms
+    -- with the path substitution UNCHANGED. This surfaces each arm's
+    -- back-edge SCG independently (e.g. merge: xs-descent in one arm,
+    -- ys-descent in the other).
+    let ancestors' := (lbl, seq, []) :: ancestors
+    extractTraceSCGsAux ancestors' pos ++ extractTraceSCGsAux ancestors' neg
   | .back _ bSeq anc _ _ =>
     match ancestors.find? (fun (l, _, _) => l == anc) with
     | none => []  -- dangling back-edge; ignore
@@ -384,6 +406,9 @@ partial def extractTraceSCGsLabeledAux
     cases.flatMap fun (pat, sub) =>
       let extended := ancestors'.map fun (l, s, σ) => (l, s, (var, pat) :: σ)
       extractTraceSCGsLabeledAux extended sub
+  | .dCaseSplit lbl seq _ _ pos neg =>
+    let ancestors' := (lbl, seq, []) :: ancestors
+    extractTraceSCGsLabeledAux ancestors' pos ++ extractTraceSCGsLabeledAux ancestors' neg
   | .back lbl bSeq anc _ _ =>
     match ancestors.find? (fun (l, _, _) => l == anc) with
     | none => []

@@ -303,6 +303,22 @@ partial def computeAugAux
       let cur' := step cur g
       computeAugAux rootArgs cur' σc hyps' buds budAnnots sub
     here ++ descendants
+  | .dCaseSplit lbl _ _ _ pos neg =>
+    -- Decidable split: identity step into both arms (no root-var subst).
+    let hyps' := hypsAtSprout lbl hyps buds budAnnots
+    let aug : NodeAug :=
+      { annot := cur, relAnc := relAncOf cur,
+        ineqs := ineqsOf cur (relAncOf cur), hyps := hyps',
+        bud? := none }
+    let here : NodeAugMap := [(lbl, aug)]
+    let descendants := [pos, neg].flatMap fun child =>
+      let σc := σp
+      let parentSlots := rootArgs.map (SubjectTerm.subst σc)
+      let childSlots := effectiveSlots rootArgs σc child
+      let g := edgeSCG parentSlots childSlots
+      let cur' := step cur g
+      computeAugAux rootArgs cur' σc hyps' buds budAnnots child
+    here ++ descendants
   | .haveStep lbl _ _ _ _ cont =>
     let hyps' := hypsAtSprout lbl hyps buds budAnnots
     let aug : NodeAug :=
@@ -574,6 +590,13 @@ partial def emitTree (ctx : EmitCtx) (depth : Nat) (parentHyps : List String)
     else
       pad depth ++ "cases " ++ var ++ " with\n"
         ++ String.intercalate "\n" armsBody
+  | .dCaseSplit _ _ hyp prop pos neg =>
+    -- Decidable split → `by_cases h : P` with well-formed `·` bullets.
+    let posBody := emitTree ctx (depth + 1) parentHyps pos
+    let negBody := emitTree ctx (depth + 1) parentHyps neg
+    pad depth ++ "by_cases " ++ hyp ++ " : " ++ prop ++ "\n"
+      ++ pad depth ++ "·\n" ++ posBody ++ "\n"
+      ++ pad depth ++ "·\n" ++ negBody
   | .back lbl bSeq _ σ_back closeTac =>
     -- Look up the bud's prog slot from the augmented map. This was
     -- recorded during `computeAug` and reflects the final converged
@@ -707,6 +730,12 @@ partial def emitMutualTree (ctx : MutualEmitCtx) (depth : Nat)
           some (pad depth ++ "| " ++ header ++ " =>\n" ++ body)
     pad depth ++ "cases " ++ var ++ " with\n"
       ++ String.intercalate "\n" armsBody
+  | .dCaseSplit _ _ hyp prop pos neg =>
+    let posBody := emitMutualTree ctx (depth + 1) pos
+    let negBody := emitMutualTree ctx (depth + 1) neg
+    pad depth ++ "by_cases " ++ hyp ++ " : " ++ prop ++ "\n"
+      ++ pad depth ++ "·\n" ++ posBody ++ "\n"
+      ++ pad depth ++ "·\n" ++ negBody
   | .back _ bSeq anc _ closeTac =>
     -- Cross-theorem bud: look up the ancestor label in companionMap.
     -- The sibling-binder-vars list tells us how many args the call

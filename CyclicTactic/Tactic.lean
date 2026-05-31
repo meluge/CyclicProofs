@@ -4,6 +4,7 @@ import CyclicTactic.SizeChange
 import CyclicTactic.InductionOrder
 import CyclicTactic.PaperAnnotation
 import CyclicTactic.Theorem6
+import CyclicTactic.WFEmit
 import CyclicTactic.Build
 
 /-!
@@ -242,13 +243,14 @@ def evalBack : Tactic := fun stx => do
         | none   =>
           throwError s!"back: σ missing entry for binder '{bname}' \
             (theorem '{thmCtx.thmName}' takes binders [{thmCtx.binders.map toString}])"
-      -- Issue the recursive call.
-      let recCall := Lean.mkAppN (Lean.mkConst thmCtx.thmName) argExprs
-      let recCallStx ← Lean.PrettyPrinter.delab recCall
-      Lean.Elab.Tactic.evalTactic (← `(tactic| exact $recCallStx))
-      -- Record back-edge as `<thmName>(σ-mapped-binder-values)` so the
-      -- sequent matches the companion's shape. SCT then sees clean
-      -- per-binder descent.
+      -- Record the back-edge event FIRST, BEFORE issuing the recursive
+      -- call. The user's raw recursive scaffold may NOT type-check (e.g.
+      -- merge_length's `+1` arithmetic gap, where `exact merge_length …`
+      -- fails because the post-`simp` goal differs by `+1`s the hand proof
+      -- never closes). The scaffold exists ONLY to fire events for SCT +
+      -- emission — the committed declaration comes from the §6/WF emitter,
+      -- not the scaffold. Recording before the (possibly-throwing) `exact`
+      -- guarantees the cycle stays visible so the dispatcher can choose WF.
       let σData : CyclicTactic.Proof.Subst ← σExprs.mapM fun (v, e) => do
         return (v, ← Build.exprToSubject e)
       let bSeq : Sequent :=
@@ -262,7 +264,14 @@ def evalBack : Tactic := fun stx => do
       -- Capture the back call's source text so the tree builder can
       -- substitute it with `recurse` inside the arm prelude.
       let sourceText : String := (stx.reprint).getD ""
-      pushEvent (.back labelStr bSeq σData pos sourceText.trim)
+      pushEvent (.back labelStr bSeq σData pos sourceText.trimAscii.toString)
+      -- Issue the recursive call; if it doesn't type-check (scaffold-only
+      -- shape) fall back to `sorry` so the enclosing tactic block / `·`
+      -- bullet still completes and the command reaches its emission phase.
+      let recCall := Lean.mkAppN (Lean.mkConst thmCtx.thmName) argExprs
+      let recCallStx ← Lean.PrettyPrinter.delab recCall
+      Lean.Elab.Tactic.evalTactic
+        (← `(tactic| first | exact $recCallStx | sorry))
       let σDoc : MessageData :=
         MessageData.joinSep (σData.map fun (v, t) => m!"{v} := {t}") ", "
       let σLine := if σData.isEmpty then m!"" else m!"\n  σ: {σDoc}"
@@ -344,15 +353,90 @@ def evalCycCases : Tactic := fun stx => do
       -- The reprint sometimes includes the leading `=>` separator
       -- because the parser combines it with the body; strip it.
       let bodyTextRaw : String := (bodyArea.reprint).getD ""
-      let trimmed : String := bodyTextRaw.trim
+      let trimmed : String := bodyTextRaw.trimAscii.toString
       let bodyText : String :=
-        if trimmed.startsWith "=>" then ((trimmed.drop 2).trim : String.Slice).toString
+        if trimmed.startsWith "=>" then (trimmed.drop 2).trimAscii.toString
         else trimmed
       { ctor := ctor, binders := binders, range := range, bodyText := bodyText }
     pushEvent (.caseSplitStart varName seq armInfos)
     -- Delegate arm-body elaboration to Lean's standard cases.
     Lean.Elab.Tactic.evalTactic
       (← `(tactic| cases $var:ident with $arms:inductionAlt*))
+    pushEvent .caseSplitEnd
+  | _ => throwUnsupportedSyntax
+
+/-! ### `cyc_by_cases <h> : <prop> with | pos => … | neg => …` (Phase 2)
+
+`merge`-style recursion lives inside an `if x ≤ y` — a *Decidable*
+split. The user's proof branches with `by_cases hle : x ≤ y` and puts a
+`back R {…}` in each arm, descending on a DIFFERENT argument per arm
+(xs when `x ≤ y`, ys otherwise). Lean's plain `by_cases` is opaque to
+the event recorder, so those back-edges never fire as events and the
+cycle is invisible (no SCG ⇒ no measure to synthesise).
+
+`cyc_by_cases` makes the split visible: it records a `.dCaseSplitStart`
+(building a `.dCaseSplit` ProofTree node) carrying the two arm source
+ranges + body text, then runs Lean's `by_cases h : P` and elaborates
+each arm so its inner `back R` fires normally, attributed to the arm by
+source position. Because a decidable split refines NO root-sequent
+variable, trace extraction descends into both arms with the path
+substitution unchanged — surfacing each arm's own size-change graph
+(xs-descent vs ys-descent), which the WF backend turns into a lex/sum
+measure. The `| pos`/`| neg` arms map to `by_cases`'s goal order
+[h : P, h : ¬P]. -/
+
+syntax (name := cycByCasesTac)
+  "cyc_by_cases " ident " : " term " with "
+    (Lean.Parser.Tactic.inductionAlt)+ : tactic
+
+@[tactic cycByCasesTac]
+def evalCycByCases : Tactic := fun stx => do
+  match stx with
+  | `(tactic| cyc_by_cases $h:ident : $prop:term with $arms:inductionAlt*) =>
+    let hName := h.getId.toString
+    let goal ← getMainGoal
+    let target ← goal.getType
+    let seq : Sequent ← match ← getCurrentThm with
+      | some ctx =>
+        let args : List SubjectTerm := ctx.binders.map fun b => .var b.toString
+        pure (Sequent.succ1 { pred := ctx.thmName.toString, args := args })
+      | none =>
+        Build.exprToSequent target
+    let propStr : String := (prop.raw.reprint).getD "<prop>"
+    if arms.size != 2 then
+      throwError "cyc_by_cases: expected exactly two arms (positive `| pos => …` \
+        then negative `| neg => …`); got {arms.size}"
+    -- Extract each arm's body source range + text. The arm label (`pos`/
+    -- `neg`) is only for readability — attribution is positional: first
+    -- arm = `h : P`, second = `h : ¬P`, matching `by_cases` goal order.
+    let armData : Array (SourceRange × String × Lean.TSyntax `Lean.Parser.Tactic.tacticSeq) :=
+      arms.map fun arm =>
+        let bodyArea := arm.raw[1]
+        let range : SourceRange :=
+          match bodyArea.getRange? with
+          | some r => { startPos := r.start.byteIdx, endPos := r.stop.byteIdx }
+          | none   => { startPos := 0, endPos := 0 }
+        let bodyTextRaw : String := (bodyArea.reprint).getD ""
+        let trimmed : String := bodyTextRaw.trimAscii.toString
+        let bodyText : String :=
+          if trimmed.startsWith "=>" then (trimmed.drop 2).trimAscii.toString
+          else trimmed
+        -- The arm body's tacticSeq is the last child of the body area.
+        let bodySeq : Lean.TSyntax `Lean.Parser.Tactic.tacticSeq := ⟨bodyArea[bodyArea.getNumArgs - 1]⟩
+        (range, bodyText, bodySeq)
+    let (posRange, posBody, posSeq) := armData[0]!
+    let (negRange, negBody, negSeq) := armData[1]!
+    pushEvent (.dCaseSplitStart hName propStr seq posRange negRange posBody negBody)
+    -- Run the decidable split, then elaborate each arm's body in its
+    -- subgoal so the `back R {…}` calls inside fire as events. `by_cases`
+    -- leaves goals in order [h : P, h : ¬P], matching pos-then-neg.
+    Lean.Elab.Tactic.evalTactic (← `(tactic| by_cases $h:ident : $prop:term))
+    -- Elaborate each arm in its own `·`-focused subgoal so the inner
+    -- `back R {…}` fires as an event. Wrap in `(try …)`/`all_goals sorry`
+    -- so a scaffold arm that doesn't fully close still lets the command
+    -- finish and reach the post-elaboration emission phase.
+    Lean.Elab.Tactic.evalTactic (← `(tactic| · (try ($posSeq:tacticSeq)); all_goals sorry))
+    Lean.Elab.Tactic.evalTactic (← `(tactic| · (try ($negSeq:tacticSeq)); all_goals sorry))
     pushEvent .caseSplitEnd
   | _ => throwUnsupportedSyntax
 
@@ -371,6 +455,36 @@ syntax cycThmBinder := "(" ident+ " : " term ")"
 syntax (name := cyclicThmCmd)
   "cyclic_thm " ident cycThmBinder+ " : " term " by " Lean.Parser.Tactic.tacticSeq
   : command
+
+/-- Dispatcher predicate: can the §6 STRUCTURAL emitter succeed?
+
+The §6 emitter (`Theorem6.Emit.translate`) emits `induction <var>
+generalizing …` and binds one IH per recursive subterm — it can only
+express recursion that descends on a SINGLE fixed argument position
+(Wehr's lex induction order specialised to one variable). That order is
+exactly what `InductionOrder.findInductionOrder` constructs from the
+bud-companion SCC graph: `some asg` iff every strongly-connected bud
+component has a position preserved along every cycle and progressing on
+at least one.
+
+So structural emission can succeed iff `findInductionOrder` returns an
+order whose deduplicated position set has size ≤ 1 (one variable carries
+the whole induction). When it is `none`, or uses ≥ 2 distinct positions,
+no single `induction` witnesses termination and we fall back to the WF
+backend with a synthesised lex/sum measure.
+
+merge-sort's `merge` fails this: the `x ≤ y` arm descends on `xs`
+(position 0), the `x > y` arm on `ys` (position 1); no single position is
+preserved-and-progressing across BOTH arms, so `findInductionOrder`
+returns `none` ⇒ `canStructural = false` ⇒ WF. This predicate is the
+dispatcher's load-bearing criterion. -/
+def canStructural
+    (tree : Proof.ProofTree)
+    (labeled : List (String × SCGraph))
+    (arity : Nat) : Bool :=
+  match InductionOrder.findInductionOrder tree labeled arity with
+  | none     => false
+  | some asg => (InductionOrder.lexOrderFromAssignment asg).length ≤ 1
 
 @[command_elab cyclicThmCmd]
 def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
@@ -410,8 +524,27 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     resetCyclicState
     resetMutualState
     setCurrentThm (some { thmName := name.getId, binders := flatBinderNames })
-    Lean.Elab.Command.elabCommand
-      (← `(def $name:ident $bracketedBinders* : $type:term := by $tacs:tacticSeq))
+    -- Snapshot the message log BEFORE the recursive scaffold elaborates.
+    -- The scaffold (the user's raw `back`-based proof) may itself fail to
+    -- type-check — e.g. merge_length's `+1` arithmetic gap that the hand
+    -- proof never closes. It exists only to FIRE EVENTS for SCT +
+    -- emission, not as the user-facing decl. When canonical emission
+    -- (structural or WF) succeeds we drop the scaffold's diagnostics so
+    -- the build is clean; on fallback we keep them (the recursive form IS
+    -- the committed decl then, so its errors are real).
+    let msgsBeforeScaffold := (← getThe Lean.Elab.Command.State).messages
+    -- Elaborate the scaffold with `Elab.async` forced OFF (set in the monad,
+    -- NOT via a `set_option … in` syntax wrapper — that wrapper re-dispatches
+    -- the command and runs the whole elaborator twice). A tactic-body `def` is
+    -- otherwise elaborated on a background task, so its `declaration uses
+    -- 'sorry'` warning (from the scaffold's `back … | sorry`) is posted to the
+    -- message log AFTER `tryCommit` resets messages to `msgsBeforeScaffold` —
+    -- leaking a spurious sorry warning onto the otherwise kernel-clean WF /
+    -- structural decl. Synchronous elaboration lands the warning before the
+    -- reset, so the "drop scaffold diagnostics on success" logic removes it.
+    Lean.Elab.Command.withScope (fun sc => { sc with opts := sc.opts.setBool `Elab.async false }) do
+      Lean.Elab.Command.elabCommand
+        (← `(def $name:ident $bracketedBinders* : $type:term := by $tacs:tacticSeq))
     -- Phase B: build a ProofTree from recorded events.
     let st ← getCyclicState
     let events := st.events.reverse
@@ -457,11 +590,14 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     let augMsg := CyclicTactic.Theorem6.renderAug augMap
     Lean.logInfoAt name m!"[cyclic_thm {name.getId}] SCT: {sctMsg}\n{orderMsg}\n{paperMsg}\nback-edge SCGs:\n{graphsStr}\n\nProofTree:\n{Build.renderTree tree}\n\n§6 per-node info (RelAnc/Ineq/Hyp):\n{augMsg}"
     -- Snapshot env-with-recursive so we can restore the recursive
-    -- form if §6 emission fails.
+    -- form if canonical emission fails.
     let envWithRecursive ← Lean.getEnv
-    -- Phase E: try Theorem 6.1 canonical emission. On success, we roll
-    -- back env to BEFORE the recursive elaboration and commit the §6
-    -- script as <name>. On failure, we restore envWithRecursive so
+    -- Message log INCLUDING the scaffold's diagnostics — restored if
+    -- canonical emission fails and the recursive form becomes the decl.
+    let msgsAfterScaffold := (← getThe Lean.Elab.Command.State).messages
+    -- Phase E: try canonical emission (structural §6 or WF). On success,
+    -- roll back env to BEFORE the recursive elaboration and commit the
+    -- emitted script as <name>. On failure, restore envWithRecursive so
     -- the recursive form stands as the user-facing declaration.
     if sctOk then
       -- Read binder types from the already-elaborated recursive def's
@@ -489,40 +625,82 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
             let si ← Build.buildSortInfo typeExpr
             return (bname.toString, si)
       let goalTypeStr := type.raw.reprint.getD "<unknown-goal>"
-      -- Canonical emitter: Grotenhuis-Otten Theorem 6.1 (§6). Drives
-      -- the declaration that gets committed as <name>.
-      let script := CyclicTactic.Theorem6.Emit.translate
-        (defaultSimpPred := st.goalHeadName)
-        (goalType := goalTypeStr)
-        (thmName := name.getId.toString)
-        (varSorts := varSorts)
-        tree
-      Lean.logInfoAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 emitted script:\n{script}"
-      match Lean.Parser.runParserCategory envWithRecursive `command script with
-      | .ok cmdStx =>
-        -- Roll back env to before the recursive form, then try the §6
-        -- emission. Snapshot message log so we can restore on failure.
-        Lean.setEnv envBefore
-        let beforeMsgs := (← getThe Lean.Elab.Command.State).messages
-        try Lean.Elab.Command.elabCommand cmdStx catch _ => pure ()
-        let envAfter ← Lean.getEnv
-        let hasGoodValue : Bool :=
-          match envAfter.find? name.getId with
-          | some di =>
-            match di.value? with
-            | some v => !v.hasSorry
-            | none   => true
-          | none    => false
-        if hasGoodValue then
-          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: Theorem 6.1 emission ✓"
+      -- Dispatcher (Phase 3): choose the STRUCTURAL §6 emitter when a
+      -- single induction variable witnesses termination, else the WF
+      -- backend with a synthesised lex/sum measure. The decision is
+      -- computed from the §6/SCT data BEFORE attempting emission. Each
+      -- branch logs a textually-DISTINCT marker (chosen / committed ✓ /
+      -- FALLBACK) so a fresh compile proves which path produced <name> —
+      -- a green build alone is NOT proof of WF emission.
+      let useStructural := canStructural tree labeled arity
+      -- Shared committer: parse `script`, roll env back to `envBefore`,
+      -- drop the scaffold's diagnostics, elaborate, and report whether a
+      -- sorry-free value was committed (restoring the recursive form +
+      -- its diagnostics on failure).
+      -- The committed `def`/`theorem` is added under the CURRENT namespace
+      -- (e.g. inside `namespace MergeSort`, `merge_length` becomes
+      -- `MergeSort.merge_length`). Resolve the qualified name so the
+      -- success-check below finds it — looking up the bare `name.getId`
+      -- silently misses namespaced decls and wrongly triggers FALLBACK.
+      let currNs := (← Lean.Elab.Command.getScope).currNamespace
+      let qualName := currNs ++ name.getId
+      let tryCommit : String → Lean.Elab.Command.CommandElabM Bool := fun script => do
+        match Lean.Parser.runParserCategory envWithRecursive `command script with
+        | .ok cmdStx =>
+          Lean.setEnv envBefore
+          modifyThe Lean.Elab.Command.State fun s => { s with messages := msgsBeforeScaffold }
+          try Lean.Elab.Command.elabCommand cmdStx catch _ => pure ()
+          let envAfter ← Lean.getEnv
+          let hasGoodValue : Bool :=
+            match envAfter.find? qualName <|> envAfter.find? name.getId with
+            | some di =>
+              match di.value? with
+              | some v => !v.hasSorry
+              | none   => true
+            | none    => false
+          if hasGoodValue then
+            return true
+          else
+            Lean.setEnv envWithRecursive
+            modifyThe Lean.Elab.Command.State fun s => { s with messages := msgsAfterScaffold }
+            return false
+        | .error msg =>
+          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] emitted script parse failed ({msg})."
+          return false
+      if useStructural then
+        Lean.logInfoAt name m!"[cyclic_thm {name.getId}] dispatcher chose structural: single-variable induction order suffices."
+        let script := CyclicTactic.Theorem6.Emit.translate
+          (defaultSimpPred := st.goalHeadName)
+          (goalType := goalTypeStr)
+          (thmName := name.getId.toString)
+          (varSorts := varSorts)
+          tree
+        Lean.logInfoAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 emitted script:\n{script}"
+        if ← tryCommit script then
+          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: Theorem 6.1 (structural) emission ✓"
         else
-          -- Restore env-with-recursive (§6 emission produced sorries)
-          -- and drop messages from the failed canonical attempt.
-          Lean.setEnv envWithRecursive
-          modifyThe Lean.Elab.Command.State fun s => { s with messages := beforeMsgs }
-          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 emission produced sorries; keeping recursive form as `{name.getId}`."
-      | .error msg =>
-        Lean.logWarningAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 script parse failed ({msg}); keeping recursive form."
+          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] structural emission failed; keeping recursive form (FALLBACK)."
+      else
+        -- WF path: synthesise a lex/sum measure from the per-back-edge
+        -- size-change graphs and emit `termination_by … decreasing_by`.
+        let gs := Proof.extractTraceSCGs tree
+        match synthMeasure gs arity with
+        | some measure =>
+          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] dispatcher chose WF: findInductionOrder has no single-variable order; measure = {measure}"
+          let script := CyclicTactic.WFEmit.translate
+            (defaultSimpPred := st.goalHeadName)
+            (goalType := goalTypeStr)
+            (thmName := name.getId.toString)
+            (varSorts := varSorts)
+            (measure := measure)
+            tree
+          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] WF emitted script:\n{script}"
+          if ← tryCommit script then
+            Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: WF emission ✓ (termination_by)"
+          else
+            Lean.logWarningAt name m!"[cyclic_thm {name.getId}] WF emission failed; keeping recursive form (FALLBACK)."
+        | none =>
+          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] dispatcher: no structural order and no synthesisable measure; keeping recursive form (FALLBACK)."
     setCurrentThm none
   | _ => Lean.throwError "cyclic_thm: malformed syntax"
 
@@ -551,6 +729,12 @@ def evalCycState : Tactic := fun _ => do
       let armNames := arms.map (·.ctor.toString)
       lines := lines ++ [s!"{pad}cases {v} (arms: {String.intercalate ", " armNames})"]
       indent := indent + 1
+    | .dCaseSplitStart h p _ _ _ _ _ =>
+      lines := lines ++ [s!"{pad}by_cases {h} : {p}"]
+      indent := indent + 1
+    | .dCaseArmSep =>
+      -- Separator between the pos/neg arms of a recorded `by_cases`.
+      lines := lines ++ [s!"{pad}·"]
     | .caseSplitEnd =>
       indent := indent - 1
     | .back anc _ σ pos _ =>

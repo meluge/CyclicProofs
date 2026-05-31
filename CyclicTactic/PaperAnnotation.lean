@@ -613,6 +613,20 @@ partial def annotateTreeAux
       let cur' := step cur g
       let cycleNames' := cycleNames.filter (cur'.names.elem ·)
       annotateTreeAux rootArgs cur' σc cycleNames' ancestors' sub
+  | .dCaseSplit lbl _ _ _ pos neg =>
+    -- Decidable split: no root-var substitution, identity edge into each
+    -- arm (slots unchanged). Mirrors `.node`'s identity step but with two
+    -- children.
+    let frame : AncestorFrame := ⟨lbl, cur, σp⟩
+    let ancestors' := frame :: ancestors
+    [pos, neg].flatMap fun child =>
+      let σc := σp
+      let parentSlots := rootArgs.map (SubjectTerm.subst σc)
+      let childSlots := effectiveSlots rootArgs σc child
+      let g := edgeSCG parentSlots childSlots
+      let cur' := step cur g
+      let cycleNames' := cycleNames.filter (cur'.names.elem ·)
+      annotateTreeAux rootArgs cur' σc cycleNames' ancestors' child
   | .haveStep lbl _ _ _ _ cont =>
     let frame : AncestorFrame := ⟨lbl, cur, σp⟩
     let ancestors' := frame :: ancestors

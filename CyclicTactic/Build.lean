@@ -62,6 +62,20 @@ inductive CyclicEvent where
   | companion (label : String) (sequent : Sequent)
   | caseSplitStart (var : String) (sequent : Sequent) (arms : List ArmInfo)
   | caseSplitEnd
+  /-- Start of a decidable case-split (`cyc_by_cases h : P`). Carries the
+      hypothesis name, the proposition's source text, the captured
+      sequent, and the source ranges of the two `·` arms (positive arm
+      first) for back-edge attribution. Closed by `caseSplitEnd`. -/
+  | dCaseSplitStart (hyp : String) (prop : String) (sequent : Sequent)
+                    (posRange negRange : SourceRange)
+                    (posBody negBody : String)
+  /-- Boundary between the positive and negative arms of a
+      `cyc_by_cases`. Back-edges fired before this (after the matching
+      `dCaseSplitStart`) belong to the positive arm; those after, up to
+      `caseSplitEnd`, to the negative arm. Attribution is by ORDER, not
+      source position — `back`'s syntax position is lost when the arm is
+      re-elaborated through quotation, so ranges are unreliable. -/
+  | dCaseArmSep
   /-- A back-edge: ancestor label, captured sequent, σ, source
       position (for arm attribution), and source text (for emission —
       gets replaced by `recurse` inside the arm prelude). -/
@@ -188,6 +202,12 @@ private inductive InnerEvent where
          (pos : Nat) (sourceText : String)
   | nestedCase (var : String) (sequent : Sequent)
                 (arms : List ArmInfo) (inner : List InnerEvent)
+  | nestedDCase (hyp : String) (prop : String) (sequent : Sequent)
+                (posRange negRange : SourceRange)
+                (posBody negBody : String) (inner : List InnerEvent)
+  /-- The positive/negative arm boundary inside a decidable split's
+      flat inner-event list (from `CyclicEvent.dCaseArmSep`). -/
+  | armSep
   deriving Inhabited
 
 /-- Consume events from the start of a case-split scope, grouping
@@ -207,15 +227,80 @@ private partial def consumeScope
       let (subInner, afterSub) := consumeScope tail
       inner := inner ++ [.nestedCase v s arms subInner]
       rest := afterSub
+    | .dCaseSplitStart h p s pr nr pb nb :: tail =>
+      let (subInner, afterSub) := consumeScope tail
+      inner := inner ++ [.nestedDCase h p s pr nr pb nb subInner]
+      rest := afterSub
+    | .dCaseArmSep :: tail          =>
+      inner := inner ++ [.armSep]
+      rest := tail
     | _ :: tail                     => rest := tail
   return (inner, rest)
 
-/-- Assemble the body of a case-split: for each arm, find inner events
+/-! Assemble the body of a case-split: for each arm, find inner events
     that fall within its source range. Per arm:
       * No matching events → `.leaf` (closeTac = arm body text)
       * One back → `.back` (closeTac = arm body with back text → "recurse")
       * One nested case-split → `.caseSplit`
+      * One nested decidable split → `.dCaseSplit`
       * Multiple backs → `.node "branch"` (multi-rec via refine ⟨…⟩) -/
+
+/-- Start position of an inner event (for range-based arm attribution). -/
+private def innerStartPos : InnerEvent → Nat
+  | .back _ _ _ p _              => p
+  | .nestedCase _ _ nArms _      =>
+    match nArms with | [] => 0 | a :: _ => a.range.startPos
+  | .nestedDCase _ _ _ pr _ _ _ _ => pr.startPos
+  | .armSep                       => 0
+
+mutual
+
+/-- Build the `ProofTree` body for one "arm-like" scope: a labelled
+    region with body text + the inner events that fall inside it. Shared
+    by inductive `cyc_cases` arms and decidable `cyc_by_cases` arms. -/
+private partial def buildArmBody
+    (rootSeq : Sequent) (lbl bodyText : String) (matching : List InnerEvent)
+    : ProofTree :=
+  match matching with
+  | []                              =>
+    let closeTac := if bodyText.isEmpty then none else some bodyText
+    .leaf s!"_L_{lbl}" rootSeq "external" closeTac
+  | [.back anc bSeq σ _ srcText]    =>
+    let closeTac : Option String :=
+      if bodyText.isEmpty then none
+      else if srcText.isEmpty then some (bodyText ++ "\nrecurse")
+      else some (bodyText.replace srcText "recurse")
+    .back s!"_B_{lbl}" bSeq anc σ closeTac
+  | [.nestedCase v s nArms nInner]  =>
+    .caseSplit s!"_R_{lbl}" s v (assembleArms s nArms nInner)
+  | [.nestedDCase h p s pr nr pb nb nInner] =>
+    assembleDCase s s!"_RD_{lbl}" h p pr nr pb nb nInner
+  | events                          =>
+    -- Multiple events — typical: `refine ⟨?_, …⟩; · back …; · back …`.
+    let allBacks := events.all fun e =>
+      match e with | .back .. => true | _ => false
+    if allBacks then
+      let children : List ProofTree := events.zipIdx.map fun (event, evIdx) =>
+        match event with
+        | .back anc bSeq σ _ _ =>
+          .back s!"_BR_{lbl}_{evIdx}" bSeq anc σ none
+        | _ =>
+          .leaf s!"_BR_fallback_{evIdx}" rootSeq "branch slot fallback" none
+      .node s!"_branch_{lbl}" rootSeq "branch" children
+    else
+      .leaf s!"_L_{lbl}_multi" rootSeq "mixed-event arm not yet supported" none
+
+/-- Assemble a `.dCaseSplit` from its two arm ranges + inner events. -/
+private partial def assembleDCase
+    (rootSeq : Sequent) (lbl hyp prop : String)
+    (posRange negRange : SourceRange) (posBody negBody : String)
+    (inner : List InnerEvent) : ProofTree :=
+  let posMatching := inner.filter (fun e => posRange.contains (innerStartPos e))
+  let negMatching := inner.filter (fun e => negRange.contains (innerStartPos e))
+  let posTree := buildArmBody rootSeq s!"{lbl}_pos" posBody posMatching
+  let negTree := buildArmBody rootSeq s!"{lbl}_neg" negBody negMatching
+  .dCaseSplit lbl rootSeq hyp prop posTree negTree
+
 private partial def assembleArms
     (rootSeq : Sequent) (arms : List ArmInfo) (inner : List InnerEvent)
     : List (SubjectTerm × ProofTree) :=
@@ -224,41 +309,11 @@ private partial def assembleArms
     let binderArgs : List SubjectTerm :=
       arm.binders.map fun b => .var b.toString
     let pat : SubjectTerm := .ctor ctorShort binderArgs
-    let matching := inner.filter fun e =>
-      match e with
-      | .back _ _ _ p _          => arm.range.contains p
-      | .nestedCase _ _ nArms _  =>
-        match nArms with
-        | []     => false
-        | a :: _ => arm.range.contains a.range.startPos
-    let armBody : ProofTree := match matching with
-      | []                              =>
-        let closeTac := if arm.bodyText.isEmpty then none else some arm.bodyText
-        .leaf s!"_L_{arm.ctor}_{armIdx}" rootSeq "external" closeTac
-      | [.back anc bSeq σ _ srcText]    =>
-        let closeTac : Option String :=
-          if arm.bodyText.isEmpty then none
-          else if srcText.isEmpty then some (arm.bodyText ++ "\nrecurse")
-          else some (arm.bodyText.replace srcText "recurse")
-        .back s!"_B_{arm.ctor}_{armIdx}" bSeq anc σ closeTac
-      | [.nestedCase v s nArms nInner]  =>
-        .caseSplit s!"_R_{arm.ctor}_{armIdx}" s v (assembleArms s nArms nInner)
-      | events                          =>
-        -- Multiple events — typical: `node l r => refine ⟨?_, …⟩;
-        -- · back R {…}; · back R {…}`. Build `.node "branch"`.
-        let allBacks := events.all fun e =>
-          match e with | .back .. => true | _ => false
-        if allBacks then
-          let children : List ProofTree := events.zipIdx.map fun (event, evIdx) =>
-            match event with
-            | .back anc bSeq σ _ _ =>
-              .back s!"_BR_{arm.ctor}_{armIdx}_{evIdx}" bSeq anc σ none
-            | _ =>
-              .leaf s!"_BR_fallback_{evIdx}" rootSeq "branch slot fallback" none
-          .node s!"_branch_{arm.ctor}_{armIdx}" rootSeq "branch" children
-        else
-          .leaf s!"_L_{arm.ctor}_multi_{armIdx}" rootSeq "mixed-event arm not yet supported" none
+    let matching := inner.filter fun e => arm.range.contains (innerStartPos e)
+    let armBody := buildArmBody rootSeq s!"{arm.ctor}_{armIdx}" arm.bodyText matching
     (pat, armBody)
+
+end
 
 /-- Build a complete `ProofTree` from the event stream. -/
 partial def eventsToTree (events : List CyclicEvent) : ProofTree :=
@@ -275,6 +330,9 @@ where
       let (inner, _post) := consumeScope rest
       let armBodies := assembleArms rootSeq arms inner
       .caseSplit companionLbl rootSeq var armBodies
+    | .dCaseSplitStart h p _ pr nr pb nb :: rest =>
+      let (inner, _post) := consumeScope rest
+      assembleDCase rootSeq companionLbl h p pr nr pb nb inner
     | .back anc bSeq σ _ _ :: _ =>
       .back companionLbl bSeq anc σ none
     | _ =>
@@ -301,6 +359,11 @@ partial def treeToString : ProofTree → Nat → String
         let armBody := treeToString sub (depth + 2)
         armHead ++ "\n" ++ armBody
       String.intercalate "\n" (header :: arms)
+    | .dCaseSplit lbl seq h p pos neg =>
+      let header := s!"{pad}by_cases [{lbl}] {seq} ({h} : {p})"
+      let posArm := s!"{pad}  | {h}\n" ++ treeToString pos (depth + 2)
+      let negArm := s!"{pad}  | ¬{h}\n" ++ treeToString neg (depth + 2)
+      String.intercalate "\n" [header, posArm, negArm]
     | .back lbl seq anc σ _ =>
       let σstr := if σ.isEmpty then "" else
         " {" ++ String.intercalate ", "

@@ -100,6 +100,9 @@ where
     | .caseSplit lbl _ _ cases   =>
       let path' := lbl :: path
       cases.flatMap (fun (_, sub) => go path' sub)
+    | .dCaseSplit lbl _ _ _ pos neg =>
+      let path' := lbl :: path
+      go path' pos ++ go path' neg
     | .back lbl _ anc _ _        =>
       [{ bud := lbl, companion := anc, pathLabels := path }]
     | .haveStep lbl _ _ _ _ cont =>
