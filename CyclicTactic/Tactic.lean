@@ -464,11 +464,30 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     -- script as <name>. On failure, we restore envWithRecursive so
     -- the recursive form stands as the user-facing declaration.
     if sctOk then
+      -- Read binder types from the already-elaborated recursive def's
+      -- signature. This handles dependent binders (`(h : P x)`)
+      -- correctly — re-elabbing each binder syntax independently would
+      -- fail since `x` isn't in scope outside the def's context.
       let varSorts ← Lean.Elab.Command.liftTermElabM <| do
-        binderTypes.mapM fun (bname, btStx) => do
-          let typeExpr ← Lean.Elab.Term.elabType btStx
-          let si ← Build.buildSortInfo typeExpr
-          return (bname.toString, si)
+        let env ← Lean.getEnv
+        match env.find? name.getId with
+        | some di =>
+          Lean.Meta.forallTelescope di.type fun fvars _ => do
+            let mut acc : List (String × EmitCommon.SortInfo) := []
+            for fv in fvars do
+              let decl ← fv.fvarId!.getDecl
+              let si ← Build.buildSortInfo decl.type
+              acc := acc ++ [(decl.userName.toString, si)]
+            return acc
+        | none =>
+          -- Defensive fallback: the recursive def wasn't found in the
+          -- env (shouldn't happen post-elabCommand). Fall back to the
+          -- old per-binder elab, which fails for dependent types but
+          -- works for the common non-dependent case.
+          binderTypes.mapM fun (bname, btStx) => do
+            let typeExpr ← Lean.Elab.Term.elabType btStx
+            let si ← Build.buildSortInfo typeExpr
+            return (bname.toString, si)
       let goalTypeStr := type.raw.reprint.getD "<unknown-goal>"
       -- Canonical emitter: Grotenhuis-Otten Theorem 6.1 (§6). Drives
       -- the declaration that gets committed as <name>.

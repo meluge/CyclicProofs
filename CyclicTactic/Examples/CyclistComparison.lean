@@ -6,6 +6,26 @@ set_option warningAsError false
 /-!
 # Comparison with Cyclist (Brotherston-Gorogiannis-Petersen 2012)
 
+## ⚠ Known issue: this file hangs during elaboration
+
+`lake build CyclicTactic.Examples.CyclistComparison` does not complete.
+The crash is a pre-existing stack overflow in
+`CyclicTactic.Proof.SubjectTerm.toString` triggered by one of the later
+examples in this file (`sum_is_nlike_cyc`, the `prove_p` / `prove_q`
+mutual block, or the inductive-predicate hypotheses they use). The
+earlier examples in this file (`succAdd_cyc`, `addAssoc_cyc`,
+`od_is_nlike_cyc` / `ev_is_nlike_cyc`) elaborate cleanly when isolated;
+see `CyclicTactic/Examples/MutualSmoke.lean` for the Od/Ev block in
+isolation.
+
+This is unrelated to the §6 emission work — both `main` (Sprenger-Dam
+emitter) and `grotenhuis-emission` (§6 emitter) hit the same crash.
+Fixing it likely requires investigating how `SubjectTerm.toString`
+unfolds inductive-predicate hypotheses (`h : ADDp x y z`,
+`h : Od n`, …) — possibly an infinite term traversal when the
+recorded sequent captures the hypothesis's *type* recursively. Filed
+here pending separate investigation.
+
 Ports cyclist's first-order benchmark `benchmarks/fo/` to
 `CyclicTactic`. Each cyclist `.tst` (or `.tst-no` / `.tst.no`) maps
 to a comparable Lean theorem.

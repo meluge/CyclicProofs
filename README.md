@@ -114,6 +114,8 @@ A case-split in the §6 emission becomes `induction <var> generalizing <rest> wi
 | `Build.lean` | Event recorder + `ProofTree` builder + `Expr → SubjectTerm` + `buildSortInfo`. |
 | `Examples/` | Worked examples — Smoke, Probe, drp, MutualSmoke, CyclistComparison. |
 
+[`CyclicTactic/PIPELINE.md`](CyclicTactic/PIPELINE.md) walks the flow end-to-end on the `btPredT` (multi-recursive binary-tree) example, including the §5 annotation, §6 augmentation, and canonical-replacement steps.
+
 ## Comparison with Cyclist (Brotherston-Gorogiannis-Petersen 2012)
 
 `Examples/CyclistComparison.lean` ports cases from cyclist's first-order benchmark `benchmarks/fo/`:
@@ -143,9 +145,15 @@ Cyclist fails on 10/11 because its first-order proof search applies sequent rule
 ## Building
 
 ```
-lake build           # library + Main executable
-lake exe cyclic      # runs Main.lean
+# Build the library + the example files that elaborate cleanly:
+lake build CyclicTactic.Examples.Smoke \
+           CyclicTactic.Examples.Probe \
+           CyclicTactic.Examples.Probe2 \
+           CyclicTactic.Examples.drp \
+           CyclicTactic.Examples.MutualSmoke
 ```
+
+A bare `lake build` will hang because `CyclicTactic.Examples.CyclistComparison` triggers a pre-existing stack overflow in `SubjectTerm.toString` on one of its later examples (`sum_is_nlike_cyc` or the `prove_p` / `prove_q` mutual block). See the file header for details. Cyclist comparison results that *do* elaborate (tests 9, 10, 11, 01-mutual) are captured by `Examples.drp` and `Examples.MutualSmoke`.
 
 Toolchain: `leanprover/lean4:v4.29.0`.
 
