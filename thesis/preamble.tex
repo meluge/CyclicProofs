@@ -1,0 +1,99 @@
+% Preamble for CyclicTactic thesis/paper draft.
+% Targets a generic article class; switch to a thesis class later by
+% replacing \documentclass in main.tex.
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+
+% Math
+\usepackage{amsmath, amssymb, amsthm, mathtools}
+% Future-use: \usepackage{stmaryrd} (extra math symbols)
+% Future-use: \usepackage{mathpartir} (inference rules)
+
+% Map common Unicode chars in body text to math-mode equivalents so
+% references like `\code{σ}` work without manual escaping.
+\usepackage{booktabs}     % \toprule, \midrule, \bottomrule
+\usepackage{pifont}       % \ding{52} for check marks
+
+\usepackage{newunicodechar}
+\newunicodechar{σ}{\ensuremath{\sigma}}
+\newunicodechar{✓}{\ding{52}}
+\newunicodechar{✗}{\ding{56}}
+\newunicodechar{∀}{\ensuremath{\forall}}
+\newunicodechar{∃}{\ensuremath{\exists}}
+\newunicodechar{∈}{\ensuremath{\in}}
+\newunicodechar{⊆}{\ensuremath{\subseteq}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{→}{\ensuremath{\to}}
+\newunicodechar{↦}{\ensuremath{\mapsto}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{§}{\S}
+
+% Cross-references
+\usepackage[colorlinks=true, linkcolor=blue!50!black, citecolor=blue!50!black,
+            urlcolor=blue!50!black]{hyperref}
+\usepackage{cleveref}
+
+% Code listings (Lean + tactic syntax)
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{leankw}{rgb}{0.13,0.29,0.53}
+\definecolor{leanstr}{rgb}{0.16,0.50,0.16}
+\definecolor{leancmnt}{rgb}{0.45,0.45,0.45}
+\lstdefinelanguage{Lean}{
+  morekeywords={def,theorem,lemma,example,by,match,with,let,fun,end,
+                namespace,structure,inductive,where,partial,instance,
+                section,variable,open,import,return,do,if,then,else,
+                cyclic_thm,cyclic_mutual,thm,cyclic,cyc_cases,back,
+                end_mutual,refine,exact,apply,have,show,intro,intros,
+                cases,induction,assumption,trivial,simp,rw,sorry,
+                termination_by,decreasing_by},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[s]{/-}{-/},
+  morestring=[b]",
+  keywordstyle=\color{leankw}\bfseries,
+  commentstyle=\color{leancmnt}\itshape,
+  stringstyle=\color{leanstr},
+  basicstyle=\ttfamily\footnotesize,
+  showstringspaces=false,
+  breaklines=true,
+  columns=fullflexible
+}
+\lstset{language=Lean, frame=single, framerule=0.3pt}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{conjecture}[theorem]{Conjecture}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% Macros
+\newcommand{\Nat}{\mathbb{N}}
+\newcommand{\Prop}{\mathrm{Prop}}
+\newcommand{\Sort}{\mathrm{Sort}}
+\newcommand{\Type}{\mathrm{Type}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{\small #1}}
+\newcommand{\Later}{\triangleright}
+\newcommand{\Lob}{\textsf{L\"ob}}
+\newcommand{\SCT}{\textsc{sct}}
+\newcommand{\RelAnc}{\mathrm{RelAnc}}
+\newcommand{\Ineq}{\mathrm{Ineq}}
+\newcommand{\Hyp}{\mathrm{Hyp}}
+\newcommand{\cov}{\mathrm{cov}}
+\newcommand{\ResetGO}{\mathrm{Reset}}
+\newcommand{\StackGO}{\mathrm{Stack}}
+\newcommand{\NameGO}{\mathrm{Name}}

@@ -1,0 +1,62 @@
+\begin{thebibliography}{10}
+
+\bibitem{atkey2013productive}
+Robert Atkey and Conor McBride.
+\newblock Productive coprogramming with guarded recursion.
+\newblock In {\em ICFP}, 2013.
+
+\bibitem{berardi2017intuitionistic}
+Stefano Berardi and Makoto Tatsuta.
+\newblock Intuitionistic podelski-rybalchenko theorem and equivalence between
+  inductive definitions and cyclic proofs, 2017.
+\newblock arXiv:1712.03502.
+
+\bibitem{brotherston2006phd}
+James Brotherston.
+\newblock {\em Sequent Calculus Proof Systems for Inductive Definitions}.
+\newblock PhD thesis, University of Edinburgh, 2006.
+
+\bibitem{brotherston2012cyclist}
+James Brotherston, Nikos Gorogiannis, and Rasmus~Lerchedahl Petersen.
+\newblock A generic cyclic theorem prover.
+\newblock In {\em APLAS}, 2012.
+
+\bibitem{grotenhuis2026unravelling}
+Lide Grotenhuis and Dani{\"e}l Otten.
+\newblock Unravelling abstract cyclic proofs into proofs by induction, 2026.
+\newblock arXiv:2602.12054.
+
+\bibitem{jung2015iris}
+Ralf Jung, David Swasey, Filip Sieczkowski, Kasper Svendsen, Aaron Turon, Lars
+  Birkedal, and Derek Dreyer.
+\newblock {I}ris: Monoids and invariants as an orthogonal basis for concurrent
+  reasoning.
+\newblock In {\em POPL}, 2015.
+
+\bibitem{lee2009ranking}
+Chin~Soon Lee.
+\newblock Ranking functions for size-change termination.
+\newblock {\em ACM Trans. Program. Lang. Syst.}, 31(3), 2009.
+
+\bibitem{lee2001size}
+Chin~Soon Lee, Neil~D. Jones, and Amir~M. Ben-Amram.
+\newblock The size-change principle for program termination.
+\newblock In {\em POPL}, 2001.
+
+\bibitem{simpson2017cyclic}
+Alex Simpson.
+\newblock Cyclic arithmetic is equivalent to {P}eano arithmetic.
+\newblock In {\em FoSSaCS}, 2017.
+
+\bibitem{sprenger2003structure}
+Christoph Sprenger and Mads Dam.
+\newblock On the structure of inductive reasoning: Circular and tree-shaped
+  proofs in the \(\mu\)-calculus.
+\newblock In {\em FoSSaCS}, 2003.
+
+\bibitem{wehr2025cyclic}
+Dominik Wehr.
+\newblock {\em Cyclic Proof Theory}.
+\newblock PhD thesis, [University], 2025.
+
+\end{thebibliography}

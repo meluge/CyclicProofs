@@ -1,0 +1,287 @@
+\section{Limitations and ongoing extensions}
+\label{sec:limitations}
+
+\subsection{What the current system cannot express}
+
+The current §6-structural emitter handles cyclic proofs whose recursion
+fits Lean's structural-recursion check. Several classes of proofs lie
+outside this scope.
+
+\paragraph{Non-structural recursion.}
+The most visible limitation is exposed by merge-sort. The auxiliary lemma
+\(\code{length (merge xs ys) = length xs + length ys}\) recurses on the
+result of a Decidable comparison: when \(x \le y\), it descends on
+\code{xs}; otherwise on \code{ys}. Neither argument is structurally smaller
+across both cases, so Lean's structural-recursion check rejects the
+underlying \code{def} produced by Phase~B, and the structural §6 emitter
+cannot witness termination on any single variable. This is precisely the
+case the dispatcher (§\ref{sec:dispatch}) detects and routes to the
+well-founded backend, where a lexicographic measure
+\((\code{xs.length}, \code{ys.length})\) takes over; merge-sort additionally
+exposes a residual arithmetic-discharge gap (the \code{+1} step the hand
+proof leaves to \code{omega}) that is independent of the dispatch.
+
+\paragraph{Decidable case-splits.}
+The original \code{cyc\_cases} tactic recorded only inductive-type case
+splits, so a proof body containing \code{by\_cases h : P} with back-edges
+in each branch was opaque to the event recorder. The \code{cyc\_by\_cases}
+tactic (\file{CyclicTactic/Tactic.lean}) now closes this gap: it records a
+Decidable split as a \code{.dCaseSplitStart} event the same way
+\code{cyc\_cases} records inductive ones, so the back-edges within each
+branch enter the size-change check and the proof can dispatch to WF
+emission (§\ref{sec:dispatch}).
+
+\paragraph{DAG-shaped cyclic proofs.}
+The system assumes back-edges target ancestors only. Cyclic proofs that
+share intermediate sub-derivations across multiple branches (DAG-shaped
+proofs in the sense of Brotherston's PhD~\cite{brotherston2006phd}) cannot
+be expressed directly. The standard workaround---factoring shared
+sub-derivations into separate \code{cyclic\_thm}s or \code{cyclic\_mutual}
+entries---works for most practical proofs but is not always idiomatic. We
+discuss the theoretical equivalence in §\ref{sec:dag-discussion} below.
+
+\paragraph{Multi-companion in a single theorem.}
+The §6 data model assumes companion = root: every back-edge in a single
+\code{cyclic\_thm} body cycles to the same companion (the root sequent).
+Proofs whose natural shape uses multiple \code{cyclic} declarations within
+one theorem body (with different buds targeting different companions) are
+not expressible. \code{cyclic\_mutual} offers a workaround by splitting
+into mutually-recursive entries, but the surface ergonomics differ.
+
+\paragraph{Within-entry cycles in \code{cyclic\_mutual}.}
+The mutual emitter currently skips §6 augmentation, because
+\code{annotateTree}'s Lemma 5.9 unfolding does not terminate on
+cross-theorem buds. A \code{cyclic\_mutual} block whose entries contain
+within-entry back-edges (in addition to cross-companion edges) is therefore
+not supported. The §6 framework's extension to mutual systems is, to our
+knowledge, an open theoretical question.
+
+\paragraph{Proposition 5.8 verification.}
+Our system uses Wehr~3.2.4's lex-order finder (Theorem~3.2.4 of
+\cite{wehr2025cyclic}) as a check on the induction order, complementary to
+the Grotenhuis-Otten Theorem~5.2 progressing-name verification. The paper's
+Proposition~5.8 gives a stronger verification of the induction order that
+we do not implement; we delegate this to Lean's structural-recursion check.
+Implementing Proposition~5.8 directly would turn the current diagnostic
+PASS/FAIL into a real proof obligation.
+
+\paragraph{Multi-sort extension (§8).}
+Grotenhuis-Otten §8 extends the unravelling algorithm to multi-sorted
+inductive systems. We currently handle single-sorted cyclic proofs;
+extending to §8 would let cyclic proofs span fundamentally distinct
+inductive types as their recursion structure.
+
+\subsection{Tree-shape versus DAG-shape: a discussion}
+\label{sec:dag-discussion}
+
+It is worth being precise about what is lost when we restrict to
+tree-shaped cyclic proofs with back-edges to ancestors only. Sprenger and
+Dam's Theorem~5 and its descendants establish that tree-shaped and
+DAG-shaped cyclic proofs prove the same sequents: any DAG can be unfolded
+to a tree by duplicating shared sub-derivations, with potentially
+exponential blow-up. So provability is not affected.
+
+What \emph{is} affected:
+
+\begin{itemize}
+  \item \textbf{Proof size.} A DAG with many shared sub-derivations
+    unfolds to a tree exponentially larger.
+  \item \textbf{Sharing-natural patterns.} Symmetry-driven proofs,
+    cross-recursive lemmas with shared support, and confluence-style
+    arguments naturally have DAG shape.
+  \item \textbf{Lateral cycles.} A back-edge from one branch of a
+    proof tree to a node in another branch (not an ancestor) cannot be
+    represented.
+\end{itemize}
+
+For the Lean tactic-mode setting we target, this restriction is less
+constraining than it sounds. Lean idiom favours factoring shared
+sub-derivations into separate \code{theorem}s or local \code{have}
+binders---both of which absorb the sharing-naturalness patterns above. The
+remaining genuinely lateral case (a single proof tree with a non-ancestor
+back-edge) is rare in practice and can typically be expressed by promoting
+the lateral target to a separate \code{cyclic\_thm}.
+
+This trade-off is most visible against Cyclist's separation-logic
+benchmark (\texttt{benchmarks/sl/}), where DAG shape is heavily used by the
+proof-search procedure and our system would struggle. For Cyclist's
+first-order benchmark and for typical Lean proof work, tree-shape is a
+defensible architectural choice rather than a deficiency.
+
+\subsection{The dispatcher: structural, well-founded, and Löb emission}
+\label{sec:dispatch}
+
+The Grotenhuis-Otten §6 algorithm assumes structural emission is always
+possible. It is not: merge-sort and the swap-recursion of Cyclist's
+Test~14 (§\ref{sec:limitations}) admit no single-variable structural
+order. The system therefore \emph{dispatches} among emission strategies on
+the basis of the size-change data, rather than committing to structural
+emission unconditionally. Two of the three strategies are now implemented
+on the \code{wf} branch; the third remains under separate development. We
+describe each, then state the characterisation theorem they converge on.
+
+\paragraph{The dispatch predicate.}
+The choice between structural and well-founded emission is made by a
+single Boolean predicate, \code{canStructural}
+(\file{CyclicTactic/Tactic.lean}):
+
+\begin{lstlisting}
+def canStructural (tree : ProofTree)
+    (labeled : List (String × SCGraph)) (arity : Nat) : Bool :=
+  match InductionOrder.findInductionOrder tree labeled arity with
+  | none     => false
+  | some asg => (InductionOrder.lexOrderFromAssignment asg).length <= 1
+\end{lstlisting}
+
+\code{findInductionOrder} runs the Wehr~3.2.4 lex-order finder over the
+bud-companion strongly-connected components; it returns an assignment of
+progressing argument positions, or \code{none} when no consistent order
+exists. \code{canStructural} returns \code{true} exactly when that
+assignment, after deduplication, uses \emph{at most one} argument
+position---i.e.\ when a single \code{induction} on one variable carries the
+whole recursion, which is precisely the shape Theorem~6.1's structural
+emitter (§\ref{sec:impl-emission}) produces. When the order needs two or
+more positions (a genuine lexicographic descent), or does not exist at all,
+the predicate returns \code{false} and the proof is routed to the
+well-founded backend. Merge-sort's \code{merge} fails the predicate
+because its \(x\le y\) arm descends on \code{xs} (position~0) and its
+\(x>y\) arm on \code{ys} (position~1): no single position is
+preserved-and-progressing across both arms, so \code{findInductionOrder}
+returns \code{none}.
+
+\paragraph{Well-founded (WF) emission.}
+When \code{canStructural} is \code{false}, the system emits
+\code{def \dots\ termination\_by <measure>} with a
+\code{decreasing\_by simp\_wf; omega} discharge, via
+\code{WFEmit.translate} (\file{CyclicTactic/WFEmit.lean}). The measure is
+synthesised from the per-back-edge size-change graphs by
+\code{synthMeasure} (\file{CyclicTactic/Measure.lean}), which tries four
+schemas in increasing generality (the lex-ranking ideas are
+Lee~2009's~\cite{lee2009ranking}):
+
+\begin{enumerate}
+  \item \textbf{Lex over a permutation} of all argument positions---a
+    strict self-loop at some position, nonstrict at all earlier ones
+    (classic lex termination, e.g.\ Ackermann).
+  \item \textbf{Lex over an ordered subset}, allowing non-participating
+    positions to be dropped from the tuple.
+  \item \textbf{Sum measure} \(a_0+\dots+a_{n-1}\), for swap-style
+    recursions where the bag of arguments shrinks as a whole.
+  \item \textbf{Closure-witness greedy lex}: compute the SCT composition
+    closure, take each idempotent's strict-self-loop positions as a
+    soundness witness, and greedily build a lex order covering the most
+    uncovered idempotents at each step. This is a flat-arity
+    specialisation of the Grotenhuis-Otten Definition~5.1 reset-proof
+    construction.
+\end{enumerate}
+
+Every schema validates its candidate against the \emph{input} graphs, not
+merely the closure idempotents, because Lean's \code{termination\_by}
+requires every recursive call to decrease, not just every cycle. The
+result is a \code{Measure}, which is either \code{lex order} or
+\code{sum arity}. The Decidable case-splits that such proofs require
+(merge-sort's \code{x \(\le\) y}) are now recorded by the \code{cyc\_by\_cases}
+tactic, which emits a \code{.dCaseSplitStart} event exactly as
+\code{cyc\_cases} does for inductive splits; this closes the gap noted
+in §\ref{sec:limitations} above. The swap recursion of Test~14
+(\code{N2(x,y)} with recursive call \code{N2(y,x)}) goes through
+end-to-end: \code{synthMeasure} produces \code{sum 2}, rendered
+\code{termination\_by x + y}, and the emitted \code{n2\_holds} is a
+kernel-checked term (\file{CyclicTactic/Examples/WFSuite.lean}).
+
+\paragraph{Löb-induction emission.}
+A theoretically stronger alternative replaces structural and WF emission
+entirely with \emph{Löb induction} via a step-indexed
+embedding~\cite{atkey2013productive, jung2015iris}. Every SCT-validated
+cyclic proof can be emitted as a Löb application, using a \(\Later\)
+modality defined by \(\Later P\, n := \forall m < n, P\, m\) and the Löb
+axiom \((\forall n.\, \Later P\, n \to P\, n) \to \forall n.\, P\, n\)
+proved from \code{Nat.strongRec}. The advantage is universality: Löb
+emission applies to any SCT-valid cyclic proof, with no case analysis on
+which strategy fits. The disadvantage is artefact form: emitted proofs are
+about \(\Later P\) rather than \(P\) directly, which is less idiomatic for
+Lean users. This extension is under active development on a separate
+\code{lob} branch in a sibling repository, and is the only one of the
+three not yet integrated into the main dispatcher.
+
+\paragraph{The characterisation theorem.}
+The dispatcher \code{canStructural} and the synthesiser \code{synthMeasure}
+are total, decidable functions on the §6 size-change data; what is
+\emph{conjectural} is that their decisions agree with Lean's
+own acceptance of the emitted artefact. We separate the two.
+
+\begin{conjecture}[Dispatch soundness]
+\label{conj:dispatch}
+Let \(T\) be an SCT-valid \code{ProofTree} with labelled size-change
+graphs \(G\) and arity \(n\), and write
+\(A=\code{computeAug}\,T\) for its §6 augmentation.
+\begin{enumerate}
+  \item If \(\code{canStructural}\,T\,G\,n = \mathtt{true}\), then the
+    structural emitter \(\code{Emit.translate}\,T\) produces a term Lean's
+    structural-recursion check accepts.
+  \item If \(\code{canStructural}\,T\,G\,n = \mathtt{false}\) and
+    \(\code{synthMeasure}\,G\,n = \code{some}\,M\), then the well-founded
+    emitter \(\code{WFEmit.translate}\,M\,T\) produces a \code{def} whose
+    \(\code{termination\_by}\,M\) obligation \code{decreasing\_by} discharges.
+  \item The residual case
+    \(\code{canStructural} = \mathtt{false}\) and
+    \(\code{synthMeasure} = \code{none}\)---an SCT-valid proof whose
+    descent is captured by no lex-or-sum measure---is exactly the regime
+    in which the first two strategies fail and Löb emission is required.
+\end{enumerate}
+\end{conjecture}
+
+\begin{conjecture}[Löb universality]
+\label{conj:lob}
+For every SCT-valid \code{ProofTree} \(T\), the Löb emitter
+\(\code{Emit.translateLob}\,T\) produces a Lean-acceptable term.
+\end{conjecture}
+
+The two extensions thus carve up the SCT-valid proofs into a structural
+core (Conjecture~\ref{conj:dispatch}.1), a well-founded middle
+(Conjecture~\ref{conj:dispatch}.2), and a Löb-only remainder
+(Conjectures~\ref{conj:dispatch}.3 and~\ref{conj:lob}). Clauses~1 and~2
+are now backed by working emitters and an example suite; proving that the
+\emph{syntactic} predicates \code{canStructural} and \code{synthMeasure}
+soundly approximate Lean's \emph{semantic} acceptance---and that the Löb
+remainder is genuinely universal---are the load-bearing claims that anchor
+the next stage of the work. A proof of Conjecture~\ref{conj:dispatch}.1
+would proceed by showing the Wehr~3.2.4 single-position assignment is
+exactly the witness Lean's structural-recursion elaborator searches for;
+of clause~2, by appeal to the soundness of the Lee~2009 ranking schemas
+against the input graphs; and of Conjecture~\ref{conj:lob}, by exhibiting
+the step-indexed model in which \(\Later\) is the strict-order
+approximation and reading SCT validity as the descent that makes the Löb
+premise discharge.
+
+\subsection{Other engineering follow-ups}
+
+Several smaller items are not algorithmically interesting but are
+worth listing:
+
+\begin{itemize}
+  \item The \code{CyclicTactic/Examples/CyclistComparison.lean} file
+    has a pre-existing stack overflow in
+    \code{SubjectTerm.toString}, triggered by one of the later examples
+    in the file. The crash predates the §6 work and likely involves
+    infinite term traversal when an inductive-predicate hypothesis is
+    recorded. Investigating this is independent of the §6 / WF / Löb
+    work but blocks bare \code{lake build}.
+
+  \item The system does not yet support \code{cyclic\_thm} bodies whose
+    structure is \emph{not} a sequence of \code{cyc\_cases} \(+\)
+    \code{back} \(+\) leaves. In particular, intermediate \code{cyclic}
+    re-declarations within a single body are not handled, and
+    interleaving \code{cyclic\_thm}-style tactics with other custom
+    tactics from libraries is untested.
+
+  \item Diagnostic output is verbose but ad hoc; a structured
+    \code{[cyclic\_thm]} info schema (so external tooling can parse the
+    dispatcher's decisions) would make integration with editor extensions
+    easier.
+
+  \item Performance of the §6 augmentation has not been profiled. For
+    very deep proof trees the \code{annotateTree} \(+\)
+    \code{unfoldFixpoint} cost could become significant; we have not
+    observed this on the example suite.
+\end{itemize}

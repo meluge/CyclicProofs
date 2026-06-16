@@ -579,9 +579,9 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     -- causes are name/stack mismatches between sprout and bud, or no
     -- qualifying progressing name in `Reset(bud) ∩ preserved`.
     let paperBuds := CyclicTactic.PaperAnnotation.annotateTree tree
+    let checks := paperBuds.map CyclicTactic.PaperAnnotation.checkTheorem52
     let paperMsg : String :=
-      match CyclicTactic.PaperAnnotation.renderChecks
-              (paperBuds.map CyclicTactic.PaperAnnotation.checkTheorem52) with
+      match CyclicTactic.PaperAnnotation.renderChecks checks with
       | none     => "paper-faithful (Thm 5.2): PASS ✓"
       | some msg => "paper-faithful (Thm 5.2): FAIL ✗\n" ++ msg
     -- §6 augmented per-node info (RelAnc / Ineq / Hyp / cov). Diagnostic
@@ -677,7 +677,12 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
           tree
         Lean.logInfoAt name m!"[cyclic_thm {name.getId}] Theorem 6.1 emitted script:\n{script}"
         if ← tryCommit script then
-          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: Theorem 6.1 (structural) emission ✓"
+          -- NB: re-state the chosen strategy HERE, not only before `tryCommit`
+          -- — `tryCommit` resets the message log on success, which would
+          -- otherwise drop the "dispatcher chose …" line. The per-decision
+          -- rationale is the paper's evidence base, so it must survive a
+          -- SUCCESSFUL emission, not just a fallback.
+          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: Theorem 6.1 (structural) emission ✓ [dispatcher chose structural: single-variable induction order]"
         else
           Lean.logWarningAt name m!"[cyclic_thm {name.getId}] structural emission failed; keeping recursive form (FALLBACK)."
       else
@@ -696,7 +701,12 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
             tree
           Lean.logInfoAt name m!"[cyclic_thm {name.getId}] WF emitted script:\n{script}"
           if ← tryCommit script then
-            Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: WF emission ✓ (termination_by)"
+            -- Re-state the measure HERE: `tryCommit` resets the message log on
+            -- success, dropping the "dispatcher chose WF …" line above. The
+            -- synthesised measure is the paper's evidence base, so it must
+            -- survive a successful emission. (`measure` prints as e.g.
+            -- `lex (a0, a1)` or `sum 2`.)
+            Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: WF emission ✓ (termination_by); dispatcher chose WF: no single-variable induction order; measure = {measure}"
           else
             Lean.logWarningAt name m!"[cyclic_thm {name.getId}] WF emission failed; keeping recursive form (FALLBACK)."
         | none =>

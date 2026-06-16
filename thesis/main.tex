@@ -1,0 +1,45 @@
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\title{Cyclic Proofs as Lean Tactics:\\
+  A Paper-Faithful Implementation of\\
+  Grotenhuis-Otten Unravelling}
+\author{[Author]}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present \emph{CyclicTactic}, a Lean 4 library that lets users write cyclic
+proofs as ordinary Lean tactics and translates them into kernel-checked Lean
+theorems via a paper-faithful implementation of the Grotenhuis-Otten
+Theorem~6.1 unravelling algorithm. The system records cyclic structure into a
+side-channel \texttt{ProofTree} during tactic execution, validates it via the
+size-change principle (Lee, Jones, and Ben-Amram, 2001), augments it with
+Grotenhuis-Otten §5--§6 per-node data (Stack/Name/Reset annotation,
+\(\mathrm{RelAnc}\)/\(\mathrm{Ineq}\)/\(\mathrm{Hyp}\)/\(\mathrm{cov}\)), and
+emits a structural-induction proof that elaborates as the user-facing
+declaration. Mutual cyclic systems are handled by an analogous emitter that
+produces \texttt{mutual def \dots end} blocks with cross-theorem
+\(\sigma\)-applied calls. We compare against Cyclist on Brotherston's
+first-order benchmark and against the older Sprenger-Dam structural
+emitter (\texttt{Unravel.translate}) we deleted in favour of the §6-faithful
+path. We close by identifying the next algorithmic gap---non-structural
+recursion as in merge-sort---and outlining two extensions (well-founded
+emission, Löb induction) currently under separate development.
+\end{abstract}
+
+\tableofcontents
+
+\input{chapters/01-introduction}
+\input{chapters/02-background}
+\input{chapters/03-architecture}
+\input{chapters/04-implementation}
+\input{chapters/05-evaluation}
+\input{chapters/06-limitations-and-future}
+
+\bibliographystyle{plain}
+\bibliography{bibliography}
+
+\end{document}

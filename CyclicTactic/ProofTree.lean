@@ -78,15 +78,28 @@ partial def strictSubterm (u t : SubjectTerm) : Bool :=
 
 /-- Apply a substitution (var-name ↦ replacement) to a subject term.
     Iterates on variables so chained bindings like `[("x", x'), ("x'", x'')]`
-    resolve transitively (var "x" ↦ var "x''"). Assumes the substitution
-    is acyclic — a reasonable invariant when it's built from case-splits,
-    which always introduce fresh variables. -/
-partial def subst (σ : List (String × SubjectTerm)) : SubjectTerm → SubjectTerm
+    resolve transitively (var "x" ↦ var "x''").
+
+    The transitive `.var` chase carries an occurs-guard (`seen`): if a
+    variable name recurs while resolving a chain, we stop and keep that
+    variable rather than looping. Most substitutions built from case-splits
+    are acyclic (fresh case vars), but a *cyclic* σ — e.g. the path
+    substitution accumulated by nested `cyc_cases` over a multi-argument
+    lexicographic back-edge, where `y ↦ succ y'` and `y' ↦ succ y` chain
+    back on each other — would otherwise send this into unbounded recursion
+    (observed: a stack overflow in trace-graph extraction for the 2-Hydra /
+    any growing-argument lex cycle, BEFORE any SCT logging). The guard makes
+    extraction total on every recorded tree; on an acyclic σ it is a no-op. -/
+partial def subst (σ : List (String × SubjectTerm)) : SubjectTerm → SubjectTerm :=
+  go []
+where
+  go (seen : List String) : SubjectTerm → SubjectTerm
   | .var n =>
-    match σ.lookup n with
-    | none => .var n
-    | some t => subst σ t
-  | .ctor n args => .ctor n (args.map (subst σ))
+    if seen.contains n then .var n
+    else match σ.lookup n with
+      | none   => .var n
+      | some t => go (n :: seen) t
+  | .ctor n args => .ctor n (args.map (go seen))
 
 partial def toString : SubjectTerm → String
   | .var n => n

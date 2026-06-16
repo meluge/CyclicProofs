@@ -1,0 +1,220 @@
+\section{Implementation}
+\label{sec:implementation}
+
+This section describes the implementation of the §5 annotation, the §6
+augmentation, the §6 emission for single-theorem proofs, and the extension
+to mutual cyclic systems. Throughout we cite specific files and (where
+relevant) function names in the repository.
+
+\subsection{Definition 5.1 step and Lemma 5.9 unfolding}
+\label{sec:impl-paper-annot}
+
+The §5 annotation lives in \file{CyclicTactic/PaperAnnotation.lean}. We
+implement:
+\begin{itemize}
+  \item \code{step : NodeAnnot \(\to\) SCGraph \(\to\) NodeAnnot}, the
+    Definition~5.1 step.
+  \item \code{freshNames : Nat \(\to\) List Name \(\to\) List Name} for the
+    smallest-available naming convention.
+  \item \code{resetLoop} for the reset-to-fixpoint operation.
+  \item \code{annotateTree : ProofTree \(\to\) List BudAnnot}, which walks
+    a proof tree and produces the per-bud annotation.
+  \item \code{unfoldFixpoint}, which iterates \code{annotateTree} on a
+    single failing bud up to a key-bounded fuel (16 iterations by
+    default, well above the Lemma~5.4 bound for the proof sizes we have
+    seen).
+  \item \code{checkTheorem52}, which verifies the
+    progressing-name condition.
+\end{itemize}
+
+The implementation closely follows the paper's prose. The two
+non-obvious details are the smallest-available naming convention
+(needed for the Lemma~5.4 alphabet bound to hold structurally) and the
+key-based history tracking inside \code{unfoldFixpoint} (so the fixpoint
+is detected when a bud's annotation \emph{key} recurs, not just its value).
+
+\subsection{Per-node §6 augmentation}
+\label{sec:impl-aug}
+
+The §6 per-node data lives in \file{CyclicTactic/Theorem6.lean}. The
+top-level entry point is:
+
+\begin{lstlisting}
+def computeAug (t : ProofTree) : NodeAugMap
+\end{lstlisting}
+
+returning, for each node label \(\ell\), an \code{NodeAug} record
+containing \(\RelAnc\), \(\Ineq\), \(\Hyp\), and (for bud nodes) the
+\code{bud?} info: the bud label, its progressing name, its cover, and the
+progressing slot index.
+
+The walker \code{computeAugAux} threads a current annotation
+\code{cur~:~NodeAnnot} and a path substitution \code{σp~:~Subst} down the
+tree. At each step it computes the parent's effective slots (the
+\code{rootArgs} under \code{σp}), the child's effective slots (the
+\code{rootArgs} under the child's \code{σc}, except at back-edges where the
+child's literal sequent is used), and the edge SCG (a strict comparison
+between the two slot lists, slot-by-slot).
+
+The asymmetric treatment of back-edges versus other children is
+load-bearing: at a back-edge, the bud's sequent already reflects the
+user's \(\sigma\) substitution from the recursive call, so comparing it
+against the parent's path-narrowed slots reveals strict descent. This
+asymmetry, encoded in \code{effectiveSlots}, is what lets the §6 augmentation
+detect the recursion structure the user wrote.
+
+\subsection{§6 emission}
+\label{sec:impl-emission}
+
+The emitter \code{Theorem6.Emit.translate} walks the augmented tree and
+produces a Lean tactic-script string. The structural choice per node is:
+
+\begin{itemize}
+  \item A \code{caseSplit} node \emph{at a sprout} (i.e., a node where
+    \(\Hyp\) extends the parent's) emits as \texttt{induction <var>
+    generalizing <rest> with}, where \texttt{<rest>} is the
+    \code{rootArgs} except for the case-split variable.
+  \item A \code{caseSplit} node \emph{not at a sprout} emits as
+    \texttt{cases <var> with} (Lemma 6.3 C-rule selection).
+  \item A \code{back} node emits as \texttt{exact ih\_<recVar> <args>},
+    where \texttt{<recVar>} is read from \(\sigma\) at the prog slot and
+    \texttt{<args>} are the σ-substituted rest-of-slots.
+  \item A \code{node "branch"} (multi-recursive arm) emits as
+    \texttt{simp [<pred>]; refine \(\langle\)?\_, \dots\(\rangle\); ·
+    child; \dots} so that each branch's bud emits its IH call with the
+    correct \(\cov\)-determined IH name.
+  \item Leaves emit the user-supplied closing tactic (if any) or a default
+    \code{simp}.
+\end{itemize}
+
+The decision about \texttt{induction} versus \texttt{cases} is the most
+important fidelity gain over the pre-§6 emitter we deleted
+(\code{Unravel.translate}, which always emitted \texttt{induction}). In
+proofs where an inner case-split's subtree contains no bud that uses its
+fresh IH, the §6 emitter correctly emits \texttt{cases}, avoiding an unused
+\texttt{ih\_} binder.
+
+The top-level function:
+
+\begin{lstlisting}
+def translate (defaultSimpPred : Option String) (goalType thmName : String)
+    (varSorts : List (String × SortInfo)) (t : ProofTree) : String
+\end{lstlisting}
+
+calls \code{computeAug t} to build the per-node augmentation, then walks
+the tree via \code{emitTree}, then assembles the result into a
+\code{theorem <name> <binders> : <goalType> := by <body>} string ready to
+hand to \code{Lean.Parser.runParserCategory}.
+
+\subsection{Sort metadata and dependent binders}
+
+The emitter needs to know each binder's inductive type to emit the right
+constructor headers (e.g., \texttt{succ n'} for \texttt{Nat}, \texttt{node l r}
+for binary trees). This information is stored as \code{SortInfo} records
+(\file{CyclicTactic/EmitCommon.lean}) and built by
+\code{Build.buildSortInfo} from a Lean \code{Expr}.
+
+For binders whose types are non-dependent, the elaboration is
+straightforward (\code{Lean.Elab.Term.elabType} on the binder's type
+syntax). For \emph{dependent} binders like \code{(h : Od n)} where
+\code{n} is an earlier binder, the per-binder \code{elabType} call would
+fail because \code{n} is not in scope. We resolve this by reading
+binder types from the \emph{already-elaborated recursive def's signature}
+(via \code{Lean.Meta.forallTelescope}), which has the dependent context
+properly built. This handling is in \code{Tactic.lean} immediately after
+the §6 augmentation is computed.
+
+\subsection{Canonical-form replacement}
+
+The Phase~E replacement step is implemented as:
+
+\begin{lstlisting}
+match Lean.Parser.runParserCategory envWithRecursive `command script with
+| .ok cmdStx =>
+  Lean.setEnv envBefore                       -- roll back
+  let beforeMsgs := (← getThe ...).messages
+  try Lean.Elab.Command.elabCommand cmdStx
+  catch _ => pure ()
+  let envAfter ← Lean.getEnv
+  let hasGoodValue : Bool :=
+    match envAfter.find? name.getId with
+    | some di => match di.value? with
+                 | some v => !v.hasSorry
+                 | none   => true
+    | none    => false
+  if hasGoodValue then ()                     -- §6 form committed
+  else Lean.setEnv envWithRecursive           -- restore fallback
+\end{lstlisting}
+
+We check \code{hasSorry} rather than checking whether elaboration threw
+an exception, because Lean's elaborator may emit error \emph{diagnostics}
+(turning the value into one containing \code{sorry}) without raising; we
+treat any sorry-containing value as a §6 emission failure.
+
+\subsection{Mutual cyclic systems}
+\label{sec:impl-mutual}
+
+The \code{cyclic\_mutual} command extends the same flow to mutually-recursive
+blocks. The implementation surfaces are:
+
+\paragraph{Event demultiplexing.}
+Inside a \code{cyclic\_mutual} block, events from all entries are
+interleaved in the single event stream of \code{CyclicState}. The function
+\code{demuxMutualEvents} (in \code{Tactic.lean}) walks the chronological
+stream, using the pre-registered \emph{companion-target table} (each
+\code{cyclic <label>} declaration's label \(\mapsto\) owning theorem) to
+attribute each event to a specific theorem. The result is a list of
+per-entry event subsets.
+
+\paragraph{Per-entry tree construction.}
+For each entry's events, \code{Build.eventsToTree} produces a
+per-entry \code{ProofTree}. Each tree's back-edges reference companion
+labels that may belong to \emph{other} entries (cross-companion edges).
+
+\paragraph{Mutual emitter.}
+\code{Theorem6.Emit.translateMutual} emits a \texttt{mutual def \dots end}
+block. Cross-theorem buds (whose \code{ancestor} resolves to a sibling
+entry's companion via the companion-target table) emit as
+\texttt{exact <sibling-thm-name> <σ-applied args>}, relying on Lean's
+mutual-recursion termination check for soundness. Within-entry case-splits
+are emitted as \texttt{cases}, since the cyclic structure in the mutual
+case is provided by Lean's mutual-recursion check, not by within-tree
+sprouts.
+
+\paragraph{§6 augmentation skipped for mutual.}
+The §6 augmentation (\code{computeAug}) is skipped for mutual blocks
+because \code{annotateTree}'s Lemma 5.9 unfolding does not terminate when
+a bud's ancestor is not in the tree's ancestor stack (the cross-theorem
+case). Since cross-theorem buds emit as direct sibling calls---not IH
+applications---the §6 augmentation is unused in this case anyway. We
+return to this limitation in §\ref{sec:limitations}: \code{cyclic\_mutual}
+blocks with within-entry cycles are not yet supported.
+
+\subsection{Module layout}
+
+The implementation totals approximately 5\,400 lines of Lean code across
+the following modules:
+
+\begin{center}
+\begin{tabular}{lr}
+  \toprule
+  Module & LOC \\
+  \midrule
+  \file{SizeChange.lean} & 171 \\
+  \file{ProofTree.lean} & 400 \\
+  \file{Extract.lean} & 125 \\
+  \file{Measure.lean} & 285 \\
+  \file{Annotation.lean} & 288 \\
+  \file{InductionOrder.lean} & 307 \\
+  \file{Reorganize.lean} & 369 \\
+  \file{PaperAnnotation.lean} & 811 \\
+  \file{Theorem6.lean} & 755 \\
+  \file{EmitCommon.lean} & 155 \\
+  \file{Tactic.lean} & 897 \\
+  \file{Build.lean} & 372 \\
+  \file{Design.lean} & 448 \\
+  \midrule
+  Total & 5\,383 \\
+  \bottomrule
+\end{tabular}
+\end{center}

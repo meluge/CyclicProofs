@@ -1,0 +1,143 @@
+\section{Background}
+\label{sec:background}
+
+\subsection{Cyclic proofs}
+
+Informally, a \emph{cyclic proof} of a sequent \(\Gamma \vdash \varphi\) is a
+finite tree of inference steps in which each open branch (called a \emph{bud})
+is decorated with a back-edge to an ancestor (called a \emph{companion})
+whose sequent matches the bud's, modulo a substitution
+\(\sigma\)~\cite{brotherston2006phd}. Cyclic proofs may be unsound in
+general---one can construct trivial cyclic ``proofs'' of false
+sequents---so a global termination criterion is required.
+
+The standard criterion is Brotherston's \emph{trace condition}: every
+infinite path through the cyclic proof's underlying graph must contain
+infinitely many \emph{progressing} occurrences, where progression is defined
+by a fixed structural-subterm relation. Lee, Jones, and Ben-Amram's
+\emph{size-change principle} (SCT, \cite{lee2001size}) gives an algorithmic
+incarnation of this idea: each back-edge is annotated with a
+\emph{size-change graph} (SCG) recording which argument positions are
+strictly smaller and which are non-strictly smaller; the system passes SCT iff
+the closure of all SCG compositions contains, in every idempotent product, at
+least one strict self-loop.
+
+Sprenger and Dam's Theorem~5~\cite{sprenger2003structure} shows that any
+cyclic proof satisfying the trace condition can be unfolded into a
+tree-shaped proof using nested structural induction. This is the theoretical
+basis for the \emph{structural} translation strategy that all
+mainstream cyclic-to-inductive emitters (including Cyclist and our system)
+implement.
+
+\subsection{Cyclist and the first-order benchmark}
+
+Cyclist~\cite{brotherston2012cyclist} is a standalone tool for cyclic
+sequent-calculus proof search and first-order inductive reasoning. It
+implements the trace condition directly and produces a separate
+non-interactive proof artifact. Its \texttt{benchmarks/fo/} suite contains
+tests~01--15, covering parity reasoning (\(\mathit{Od}\)/\(\mathit{Ev}\)
+inductive predicates), addition properties, and various ordinals.
+
+Cyclist's strengths are pure first-order proof search and explicit
+trace-condition validation; its weaknesses are equational reasoning (it
+cannot apply rewrite rules and so fails on the algebraic content of tests~10
+and~11) and integration with mainstream proof
+assistants. Our system inverts this trade-off: we lose Cyclist's automatic
+proof search but gain Lean's tactic ecosystem for closing leaves and
+intermediate steps.
+
+\subsection{Grotenhuis-Otten unravelling}
+\label{sec:bg-grotenhuis}
+
+The Grotenhuis-Otten paper~\cite{grotenhuis2026unravelling} provides the
+algorithmic core of our system. We summarise §5 and §6, which are the
+sections we implement.
+
+\paragraph{Abstract cyclic systems.}
+The paper works in an abstract setting (§2): a cyclic proof is a tree whose
+nodes are labelled with sequents and whose inference rules are taken from a
+specified set, with each bud assigned a companion ancestor. The
+\emph{induced inductive system} (§3) is the target of unravelling. The
+authors give a general idea and case studies in §4 before introducing the
+key constructions in §5--§6.
+
+\paragraph{§5: Annotated cyclic representations.}
+The paper defines (Definition~5.1) a per-node annotation consisting of:
+\begin{itemize}
+  \item a \(\StackGO\) function assigning each argument position a stack of
+    fresh \emph{names},
+  \item a \(\NameGO\) set tracking which names are currently alive, and
+  \item a \(\ResetGO\) function recording which names have been ``reset'' by
+    the most recent step.
+\end{itemize}
+The Definition~5.1 \emph{step} takes a parent annotation and an edge SCG and
+produces the child annotation by (i) allocating fresh names per child slot,
+(ii) reusing ancestor stacks where the SCG permits, (iii) running a reset
+loop to fixpoint to capture the per-name dependency structure.
+
+Lemma~5.4 bounds the alphabet at \(2^m + m\) names where \(m\) is the
+arity, so by a Königs-lemma argument every cyclic proof has a finite
+annotation reached after finitely many unfolding steps. Lemma~5.9 gives the
+algorithmic shape of this unfolding: when a bud's initial annotation fails
+to satisfy Theorem~5.2's progressing-name condition, iterate the annotation
+up to a key-bounded fixpoint.
+
+\paragraph{Theorem~5.2: Existence of a cyclic representation satisfying name
+preservation.}
+This theorem says the §5 annotation can be chosen so that every bud has a
+\emph{progressing name}: a name in \(\ResetGO(\text{bud}) \cap \text{preserved
+names along the cycle}\). Verifying Theorem~5.2 amounts to checking, for
+each bud, that such a name exists.
+
+\paragraph{§6: Relativised ancestor data and Theorem~6.1.}
+Building on the §5 annotation, the paper defines per-node:
+\begin{itemize}
+  \item \(\RelAnc(n_k)\), the relativised-ancestor set;
+  \item \(\Ineq(n_k)\), the inequalities the path enforces;
+  \item \(\Hyp(n_k)\), the induction hypotheses in scope (one per
+    \emph{sprout} ancestor that introduced a fresh IH);
+  \item \(\cov(b)\) for each bud, the variable that ``covers'' the
+    progressing name (i.e., binds the IH the bud applies);
+  \item \(\sigma\) (Lemma~6.4), the substitution mapping sprout slot
+    variables to bud slot variables and the progressing slot variable to
+    \(\cov\).
+\end{itemize}
+
+Theorem~6.1 then states that the cyclic proof unfolds to a structural
+induction proof in which:
+\begin{itemize}
+  \item every \emph{sprout} (a node that introduces a fresh IH in \(\Hyp\))
+    emits as \texttt{induction <var> generalizing <rest> with};
+  \item every other internal node emits as the corresponding C-rule
+    (\texttt{cases} for case-splits, etc.);
+  \item every bud emits as an IH application with arguments determined by
+    \(\sigma\).
+\end{itemize}
+
+The paper continues with applications (§7), a multi-sort extension (§8), and
+appendices on cyclic Heyting arithmetic (App.~B) and multi-sorted inductive
+systems (App.~C). We implement §5 and §6 in full but do not address §7--§8
+or the appendices.
+
+\subsection{Related work in proof assistants}
+
+To our knowledge, no mainstream proof assistant has previously shipped a
+paper-faithful implementation of cyclic-to-inductive unravelling. The Iris
+framework~\cite{jung2015iris} provides cyclic-style reasoning via the
+\(\Later\) modality and Löb induction, but it sits at a different point in
+the design space: Iris proofs live in a step-indexed embedding rather than
+being translated into ordinary inductive proofs. The connection between
+Iris-style Löb reasoning and cyclic proofs is a known
+correspondence~\cite{simpson2017cyclic, berardi2017intuitionistic} and forms
+the basis for the Löb-induction extension under separate development
+(§\ref{sec:limitations}).
+
+Wehr's PhD thesis~\cite{wehr2025cyclic} surveys the cyclic proof theory
+landscape comprehensively and gives a fresh treatment of SCT-derived
+induction orders in §3.2 (Theorem~3.2.4), which our system uses as an
+auxiliary check alongside the Grotenhuis-Otten annotation.
+
+The older Sprenger-Dam translation tradition is implemented in Cyclist and
+in our pre-§6 baseline (\code{Unravel.translate}, since deleted). The
+present work is the first to embed the Grotenhuis-Otten §6 algorithm itself
+in a proof assistant.

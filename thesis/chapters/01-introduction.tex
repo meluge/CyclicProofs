@@ -1,0 +1,104 @@
+\section{Introduction}
+\label{sec:introduction}
+
+\subsection{Cyclic proofs in proof assistants}
+
+Cyclic proof systems offer a natural representation for reasoning about
+inductive predicates: rather than packaging an explicit induction hypothesis
+into every recursive case, the proof tree may contain \emph{back-edges} that
+point to ancestor nodes, provided a global termination criterion---typically
+the size-change principle of Lee, Jones, and Ben-Amram~\cite{lee2001size}---is
+satisfied. Sprenger and Dam~\cite{sprenger2003structure} established the
+equivalence between cyclic proofs and ordinary inductive proofs in the
+\(\mu\)-calculus, formally justifying the soundness of cyclic-proof systems
+for first-order predicates. Brotherston's PhD thesis~\cite{brotherston2006phd}
+and the Cyclist prover~\cite{brotherston2012cyclist} demonstrated the
+practical viability of cyclic proof search for sequent calculi with explicit
+trace conditions.
+
+Despite this theoretical foundation, cyclic proofs have not seen widespread
+adoption in mainstream interactive proof assistants. The gap is partly
+ergonomic: cyclic proofs are usually presented in a sequent-calculus surface
+syntax with explicit bud-companion edges, which sits awkwardly inside the
+tactic-mode workflows that dominate Lean, Coq, and Isabelle. It is also
+partly methodological: a cyclic proof's soundness depends on a
+non-local termination condition (size-change), and integrating this with the
+proof assistant's kernel-level type-checking is a nontrivial engineering
+question.
+
+A separate strand of theoretical work has recently appeared in
+Grotenhuis and Otten's \emph{Unravelling Abstract Cyclic Proofs into Proofs
+by Induction}~\cite{grotenhuis2026unravelling}. They give an algorithm,
+applicable to any sufficiently abstract cyclic system, that translates a
+cyclic proof into an inductive proof by following the local annotation
+data they call the \emph{Stack/Name/Reset} representation (§5) and the
+\emph{relativised ancestor / inequality / hypothesis / cover} per-node data
+(§6). Their Theorem~6.1 then justifies a direct structural-induction emission
+based on this data. Crucially, their algorithm operates on abstract cyclic
+representations, so the translation is independent of the specific
+proof-system or term-language details.
+
+\subsection{Contributions}
+
+This thesis presents \emph{CyclicTactic}, a Lean~4 library that lets users
+write cyclic proofs as ordinary Lean tactics and, by implementing the
+Grotenhuis-Otten Theorem~6.1 unravelling, replaces the user's interactive
+cyclic-style proof with a kernel-checked structural-induction theorem.
+
+Concretely, the contributions are:
+
+\begin{enumerate}
+  \item \textbf{Side-channel tactic-mode integration.} Three primitive
+    tactics---\code{cyclic <label>}, \code{cyc\_cases x with}, and
+    \code{back <label> \{σ\}}---let the user write cyclic proofs inside
+    Lean's standard tactic mode. Real Lean goals are visible at every
+    cursor position; cyclic structure is recorded into a side-channel
+    \code{ProofTree} value via source-position attribution
+    (§\ref{sec:architecture}).
+
+  \item \textbf{A paper-faithful implementation of Grotenhuis-Otten §5--§6.}
+    We implement the Stack/Name/Reset annotation step of Definition~5.1, the
+    Lemma~5.9 key-bounded fixpoint unfolding, the Theorem~5.2
+    progressing-name verification, and the §6 per-node augmentation
+    (\(\RelAnc\), \(\Ineq\), \(\Hyp\), \(\cov\), \(\sigma\)) needed to
+    drive emission. To our knowledge this is the first implementation of
+    the Grotenhuis-Otten algorithm in any proof assistant.
+
+  \item \textbf{Theorem 6.1 emission with canonical-form replacement.}
+    The §6-driven emitter (\code{Theorem6.Emit.translate}) produces a
+    Lean tactic script. After the user's cyclic proof elaborates as a
+    recursive \code{def} (giving real InfoView goals during writing), the
+    environment is rolled back and the §6-emitted theorem is re-elaborated as
+    the canonical user-facing declaration.
+
+  \item \textbf{Mutual cyclic systems.} A \code{cyclic\_mutual} surface
+    command, together with an event demultiplexer and a mutual emitter
+    (\code{Theorem6.Emit.translateMutual}), handles cyclic proofs that span
+    multiple mutually-recursive theorems with cross-companion back-edges.
+    Cross-theorem buds emit as direct sibling-theorem calls, relying on
+    Lean's mutual-recursion termination check for soundness.
+
+  \item \textbf{Comparison with Cyclist on Brotherston's first-order
+    benchmark.} On the cases that both systems handle, our emitter produces
+    proofs that match the structure Cyclist would emit. On
+    Brotherston's tests~10 and~11 (associativity and commutativity of
+    \texttt{ADD}, where Cyclist fails because its first-order proof search
+    cannot perform equational reasoning), we succeed by decoupling the
+    cyclic structure (validated by the size-change check) from the per-arm
+    reasoning (closed by Lean's tactic ecosystem).
+\end{enumerate}
+
+\subsection{Outline}
+
+§\ref{sec:background} reviews cyclic proof theory, the size-change principle,
+and the Grotenhuis-Otten papers. §\ref{sec:architecture} describes the
+side-channel architecture and the three primitive tactics.
+§\ref{sec:implementation} walks through the implementation of the §5
+annotation and §6 augmentation+emission. §\ref{sec:evaluation} reports the
+empirical comparison against Cyclist and presents worked examples.
+§\ref{sec:limitations} identifies the boundary cases the current system does
+not handle---most prominently merge-sort, whose recursion is not
+structural---and outlines two extensions currently under separate
+development: well-founded emission via Lee 2009-style measure
+synthesis~\cite{lee2009ranking}, and Löb-induction emission via a
+step-indexed embedding~\cite{atkey2013productive}.

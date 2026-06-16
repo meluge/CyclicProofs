@@ -1,0 +1,150 @@
+\section{System architecture}
+\label{sec:architecture}
+
+This section describes the surface tactics, the side-channel architecture,
+and the two-phase elaboration flow that lets users write cyclic proofs
+interactively while producing a kernel-checked structural-induction theorem
+as the user-facing declaration.
+
+\subsection{Surface tactics}
+
+CyclicTactic provides three primitive tactics, plus two command-level
+forms.
+
+\paragraph{\code{cyclic <label>}.}
+Registers the current goal as a named \emph{companion}. Subsequent
+back-edges within the same theorem body refer to this companion by label.
+Internally, \code{cyclic} pushes a \code{.companion lbl seq} event into the
+recorder (described below) and, for the first \code{cyclic} call in a body,
+captures the goal head constant for use as \code{defaultSimpPred} when the
+emitter needs to unfold the goal predicate.
+
+\paragraph{\code{cyc\_cases x with | <pat> => \dots}.}
+Case-splits on \code{x} while recording arm boundaries. Each arm's
+syntactic range is captured so the recorder can later attribute back-edges
+to the correct arm. The tactic delegates the actual case-split to Lean's
+built-in \code{cases}, so InfoView goals appear as usual; the only
+additional work is the event push.
+
+\paragraph{\code{back <label> [\{σ\}]}.}
+Closes the current goal via a recursive call to the enclosing theorem. The
+\code{σ} substitution specifies how each binder of the enclosing theorem
+maps to the call's arguments. \code{back R \{n := n', m := m\}} desugars to
+\code{exact <name> n' m}, which Lean's standard structural-recursion check
+accepts when \code{σ} produces strictly smaller arguments. The
+back-edge's source position, σ, and surrounding source text are pushed as a
+\code{.back} event.
+
+\paragraph{Command-level forms.}
+\code{cyclic\_thm name (binders) : type by tactics} packages the three
+primitives into a command that produces a single user-facing declaration:
+the kernel-checked structural-induction theorem produced by §6 emission, or
+the fallback recursive form if §6 emission fails. \code{cyclic\_mutual
+\dots end\_mutual} extends the same flow to mutually-recursive blocks
+(§\ref{sec:impl-mutual}).
+
+\subsection{Side-channel recording}
+
+The cyclic structure of a proof---which case-splits, which back-edges, which
+σs---is not visible to Lean's standard tactic machinery. Rather than
+modifying Lean to track this information, CyclicTactic uses a
+\emph{side-channel} architecture: each of the three primitive tactics pushes
+an event into a global \code{CyclicState} \code{IO.Ref}; events are then
+post-processed into a \code{ProofTree} value (a strongly-typed cyclic-proof
+representation defined in \code{CyclicTactic/ProofTree.lean}).
+
+The event-recording approach has three benefits over modifying Lean:
+(1) the recorder is independent of Lean's elaborator internals, so it
+survives Lean version upgrades; (2) the user gets ordinary InfoView goals
+during proof writing, with no special editor support needed; (3) the
+recorded structure is a pure-data Lean term, which we can validate, analyse,
+and transform offline.
+
+\begin{lstlisting}
+inductive CyclicEvent where
+  | companion (label : String) (sequent : Sequent)
+  | caseSplitStart (var : String) (sequent : Sequent) (arms : List ArmInfo)
+  | caseSplitEnd
+  | back (ancestor : String) (sequent : Sequent) (σ : Subst)
+         (pos : Nat) (sourceText : String)
+\end{lstlisting}
+
+The \code{ArmInfo} entries carry syntactic positions for each arm. The
+\code{Build.eventsToTree} function (in \code{CyclicTactic/Build.lean})
+walks the linear event stream: each \code{caseSplitStart}/\code{caseSplitEnd}
+scope is converted to a \code{ProofTree.caseSplit}; back-edges within an arm
+are mapped to that arm by source-position attribution.
+
+\subsection{Two-phase elaboration}
+
+The most subtle architectural choice is that \code{cyclic\_thm} elaborates
+the proof \emph{twice} in succession: first as a recursive
+\code{def}---which gives InfoView goals during interactive
+writing---then, if §6 emission succeeds, as a structural-induction
+\code{theorem} that becomes the user-facing declaration. The two phases
+never coexist in the environment.
+
+\begin{lstlisting}
+-- Phase A: snapshot env before any work
+let envBefore ← Lean.getEnv
+
+-- Phase B: elaborate recursive form. User's tactics fire here;
+-- InfoView shows real Lean goals at every cursor position.
+Lean.Elab.Command.elabCommand
+  (← `(def $name $binders : $type := by $tacs))
+
+-- Phase C: snapshot env-with-recursive as fallback
+let envWithRecursive ← Lean.getEnv
+
+-- Phase D: build ProofTree from the recorded events;
+-- run SCT + induction-order + §5 + §6 validations.
+...
+
+-- Phase E: try canonical §6 emission
+let script := Theorem6.Emit.translate ...
+match parse(script) with
+| .ok cmdStx =>
+  Lean.setEnv envBefore       -- roll back
+  try elabCommand cmdStx       -- canonical form
+  if hasGoodValue then ()      -- §6 emission committed
+  else Lean.setEnv envWithRecursive  -- restore fallback
+| .error _ =>
+  -- recursive form stays as the user-facing decl
+\end{lstlisting}
+
+The user-facing \code{<name>} is always exactly one declaration. When §6
+emission succeeds it is the structural-induction theorem; when §6 emission
+fails for any reason it is the recursive \code{def} produced by Phase~B.
+
+This architecture is what enables the system to be both ergonomic and
+paper-faithful: the user writes cyclic-style with real interactivity, but
+the kernel-checked artifact is the structural-induction proof Theorem~6.1
+unravels. To our knowledge no prior cyclic-proof system in a mainstream
+proof assistant uses this two-phase pattern.
+
+\subsection{Pipeline overview}
+
+The end-to-end flow from \code{cyclic\_thm} source to kernel-checked
+theorem proceeds through nine stages, listed below with their owning
+modules. \code{CyclicTactic/PIPELINE.md} walks the same flow on a
+multi-recursive example (\code{btPredT}).
+
+\begin{enumerate}
+  \item \textbf{Command parsing and Phase~A env snapshot}
+    (\code{Tactic.lean::elabCyclicThm}).
+  \item \textbf{Phase~B recursive-form elaboration} (Lean's standard
+    \code{def} machinery).
+  \item \textbf{Event recording} (three custom tactics push into
+    \code{CyclicState}).
+  \item \textbf{ProofTree construction} (\code{Build.lean::eventsToTree},
+    via source-position attribution).
+  \item \textbf{SCT validation} (\code{ProofTree.extractTraceSCGsLabeled}
+    \(+\) \code{SizeChange.checkMultiSCT}).
+  \item \textbf{Paper-faithful §5 annotation}
+    (\code{PaperAnnotation.lean}: Definition~5.1 step \(+\) Lemma~5.9
+    unfolding \(+\) Theorem~5.2 verification).
+  \item \textbf{§6 augmentation} (\code{Theorem6.lean::computeAug}:
+    \(\RelAnc\)/\(\Ineq\)/\(\Hyp\)/\(\cov\)/\(\sigma\) per node).
+  \item \textbf{§6 emission} (\code{Theorem6.Emit.translate}).
+  \item \textbf{Canonical replacement} (Phase~E rollback and re-elaboration).
+\end{enumerate}

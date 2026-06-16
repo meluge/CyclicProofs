@@ -268,7 +268,19 @@ where
     | some (a, a')  =>
       let stacks' := applyReset a stacks
       let names'  := gcNames names stacks'
-      go names' stacks' (acc ++ [(a, a')])
+      -- Progress guard. `applyReset a` truncates each stack after `a`; in a
+      -- well-behaved (shrinking) cycle the covered older name `a` sits below
+      -- its coverer, so the truncation strictly shrinks some stack and the
+      -- loop converges. But a GROWING-argument cycle can invert the age order
+      -- (older `a` stacked ABOVE younger `a'`, e.g. stacks `[[1,0]]`), making
+      -- `restrictStackTo a` a no-op — `findUniformCover` then keeps returning
+      -- the same `(a, a')` and `go` spins forever (observed: the 2-Hydra /
+      -- any lex cycle with a growing back-edge hung the build here). When a
+      -- reset changes nothing we are already at the effective fixpoint, so
+      -- stop. The guard never fires on a reset that makes progress, so the
+      -- annotation of every shrinking proof is unchanged.
+      if stacks' == stacks && names' == names then (stacks, names, acc)
+      else go names' stacks' (acc ++ [(a, a')])
 
 /-- One step of Def 5.1: compute child annotation from parent + edge SCG. -/
 def step (parent : NodeAnnot) (g : SCGraph) : NodeAnnot :=
