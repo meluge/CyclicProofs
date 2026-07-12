@@ -97,8 +97,10 @@ side-channel architecture and the three primitive tactics.
 annotation and §6 augmentation+emission. §\ref{sec:evaluation} reports the
 empirical comparison against Cyclist and presents worked examples.
 §\ref{sec:limitations} identifies the boundary cases the current system does
-not handle---most prominently merge-sort, whose recursion is not
-structural---and outlines two extensions currently under separate
-development: well-founded emission via Lee 2009-style measure
-synthesis~\cite{lee2009ranking}, and Löb-induction emission via a
-step-indexed embedding~\cite{atkey2013productive}.
+not handle and describes the \emph{dispatcher} that routes a non-structural
+proof---most prominently merge-sort---to a well-founded backend driven by
+Lee 2009-style measure synthesis~\cite{lee2009ranking}, extended with
+phase-aware extraction so that finite-domain (Sprenger-Dam two-step) descent
+is modelled as a size-change. It also outlines the one emission strategy still
+under separate development: Löb-induction emission via a step-indexed
+embedding~\cite{atkey2013productive}.

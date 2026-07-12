@@ -189,6 +189,26 @@ end-to-end: \code{synthMeasure} produces \code{sum 2}, rendered
 \code{termination\_by x + y}, and the emitted \code{n2\_holds} is a
 kernel-checked term (\file{CyclicTactic/Examples/WFSuite.lean}).
 
+\paragraph{Phase-aware extraction.}
+The WF backend is fed by a phase-aware pre-pass
+(\file{CyclicTactic/Phase.lean}, §\ref{sec:impl-wf}) applied to the labelled
+size-change graphs before the SCT check. A finite-domain argument---a
+\code{Bool} or enum whose value is a nullary constructor---can carry
+well-founded progress that the structural extractor reads as stagnation, which
+is exactly why the Sprenger-Dam two-step (Cyclist Test~13) fails the SCT gate
+before any measure is synthesised. The pre-pass records each back-edge's
+finite-domain constructor transition, requires the transition on every
+\emph{stalled} back-edge (one with no structural strict self-loop) to strictly
+decrease, solves a strict constructor order from those requirements by
+topological ranking (rejecting the proof if they are cyclic), and patches a
+strict self-loop into each stalled graph at the phase position. A proof whose
+only progress is a finite-domain phase thereby becomes SCT-valid, and
+\code{synthMeasure} renders the phase position as a total \code{match}-rank
+component of the lexicographic measure. Because the augmentation only adds
+edges---and runs after \code{canStructural} has consulted the raw
+graphs---it can only widen the WF-emittable class, never reroute a structural
+proof.
+
 \paragraph{Löb-induction emission.}
 A theoretically stronger alternative replaces structural and WF emission
 entirely with \emph{Löb induction} via a step-indexed
@@ -240,7 +260,12 @@ For every SCT-valid \code{ProofTree} \(T\), the Löb emitter
 The two extensions thus carve up the SCT-valid proofs into a structural
 core (Conjecture~\ref{conj:dispatch}.1), a well-founded middle
 (Conjecture~\ref{conj:dispatch}.2), and a Löb-only remainder
-(Conjectures~\ref{conj:dispatch}.3 and~\ref{conj:lob}). Clauses~1 and~2
+(Conjectures~\ref{conj:dispatch}.3 and~\ref{conj:lob}). Phase-aware
+extraction (§\ref{sec:impl-wf}) enlarges the well-founded middle at the
+expense of the remainder: a finite-domain phase proof that \code{synthMeasure}
+alone leaves at \code{none} is, after augmentation, SCT-valid and discharged by
+a lexicographic measure, so it falls under clause~2 rather than the Löb-only
+case. Clauses~1 and~2
 are now backed by working emitters and an example suite; proving that the
 \emph{syntactic} predicates \code{canStructural} and \code{synthMeasure}
 soundly approximate Lean's \emph{semantic} acceptance---and that the Löb

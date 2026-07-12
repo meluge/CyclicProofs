@@ -52,28 +52,64 @@ mapping each position to a well-founded component:
 lexicographically in `termination_by`); a singleton renders bare.
 `Measure.sum n` renders as `c₀ + c₁ + … + c_{n-1}`. -/
 
-/-- The well-founded component for the binder at position `i`. -/
-def componentFor (binders : List (String × SortInfo)) (i : Nat) : String :=
-  match binders[i]? with
-  | none          => "0"
-  | some (v, si)  =>
-    let ty := si.typeStr
-    if ty.startsWith "List" || ty.startsWith "Array" then s!"{v}.length"
-    else v
+/-- A per-position phase-rank map: `pos ↦ (ctorName ↦ rank)`, produced by the
+    phase-order solver (`Phase.phaseAugment`). A position present here is a
+    finite-domain "phase" argument whose measure component is the RANK of its
+    current constructor, not the binder itself. -/
+abbrev PhaseRanks := List (Nat × List (String × Nat))
+
+/-- The well-founded component for the binder at position `i`.
+
+    A `phaseRanks` entry at `i` overrides the default: the component becomes a
+    `match` on the binder mapping each constructor to its solved rank — turning
+    a finite-domain (Bool/enum) phase argument into a `Nat` that strictly
+    decreases as the cycle drives the phase down its order. This is the GAP-2
+    rendering; positions absent from `phaseRanks` behave exactly as before. -/
+def componentFor (binders : List (String × SortInfo)) (phaseRanks : PhaseRanks)
+    (i : Nat) : String :=
+  match phaseRanks.find? (·.1 == i) with
+  | some (_, ranks) =>
+    match binders[i]? with
+    | none         => "0"
+    | some (v, si)  =>
+      -- Rank every constructor of the binder's finite type: solved ctors get
+      -- their phase rank; the rest get 0 (they never occur on a back-edge, so
+      -- the rank is irrelevant for the decrease). Enumerating ALL ctors keeps
+      -- the `match` total WITHOUT a `| _ => 0` catch-all — Lean 4.29 rejects a
+      -- redundant catch-all on a complete match (e.g. both `Bool` cases given).
+      -- Patterns use the FULLY-QUALIFIED ctor name (`Tri.a`, not `a`): a bare
+      -- lowercase ctor name parses as a variable (catch-all) pattern, which
+      -- silently swallows the match and makes the later arms "redundant".
+      -- Ranks are keyed by short name (how the phase solver records them).
+      let rankOf := fun c => (ranks.find? (·.1 == c)).map (·.2) |>.getD 0
+      if si.ctors.isEmpty then
+        let arms := ranks.map (fun (c, r) => s!"| {c} => {r}")
+        "(match " ++ v ++ " with " ++ String.intercalate " " arms ++ " | _ => 0)"
+      else
+        let arms := si.ctors.map (fun ci => s!"| {ci.fullName} => {rankOf ci.shortName}")
+        "(match " ++ v ++ " with " ++ String.intercalate " " arms ++ ")"
+  | none =>
+    match binders[i]? with
+    | none          => "0"
+    | some (v, si)  =>
+      let ty := si.typeStr
+      if ty.startsWith "List" || ty.startsWith "Array" then s!"{v}.length"
+      else v
 
 /-- Render a synthesised `Measure` as the right-hand side of
-    `termination_by <binders> => <here>`. -/
+    `termination_by <binders> => <here>`. `phaseRanks` (default empty) overrides
+    finite-domain positions with their solved phase rank — see `componentFor`. -/
 def measureToTerminationRHS (binders : List (String × SortInfo))
-    (m : Measure) : String :=
+    (m : Measure) (phaseRanks : PhaseRanks := []) : String :=
   match m with
   | .lex order =>
-    let comps := order.map (componentFor binders)
+    let comps := order.map (componentFor binders phaseRanks)
     match comps with
     | []     => "0"
     | [c]    => c
     | _      => "(" ++ String.intercalate ", " comps ++ ")"
   | .sum n =>
-    let comps := (List.range n).map (componentFor binders)
+    let comps := (List.range n).map (componentFor binders phaseRanks)
     match comps with
     | []  => "0"
     | _   => String.intercalate " + " comps
@@ -202,12 +238,48 @@ partial def emitTree (ctx : WFCtx) (depth : Nat) : ProofTree → String
     pad depth ++ "refine ⟨" ++ witnessStr ++ ", ?_⟩\n"
       ++ emitTree ctx depth cont
 
+/-- The `decreasing_by` tactic for a synthesised measure, chosen by the
+    measure's SHAPE rather than a fixed string.
+
+    `simp_wf` first unfolds the `WellFounded`/`invImage` wrapper to expose the
+    raw order goal. Then the goal's shape depends on the measure:
+
+      * `.sum n`  → the goal is linear `Nat` arithmetic (`a + b < c + d`), which
+        `omega` discharges directly.
+      * `.lex order` (rendered as a tuple) → the goal is `Prod.Lex … (…) (…)`.
+        `omega` does NOT understand `Prod.Lex`; `simp [Prod.lex_def]` rewrites it
+        to the disjunction `a < a' ∨ (a = a' ∧ …)` and closes the trivially-true
+        disjuncts, with `omega` mopping up any residual arithmetic. (Observed:
+        for a size-preserving lex step the goal reduces to `n < n ∨ True ∧ 0 < 1`,
+        which `omega` alone rejects but `simp [Prod.lex_def]` proves.)
+
+    We wrap both in `first | … | …` so a single emitted block is robust whether
+    the measure is sum-like or lex-like, and so a lex goal that happens to be
+    closable by `omega` alone (singleton lex = bare `Nat`) still goes through.
+    This replaces the previous fixed `simp_wf; omega`, which silently failed on
+    `Prod.Lex` goals and forced those proofs into the recursive fallback.
+
+    When the measure has PHASE components (rendered as `match <binder> with …`),
+    the order goal contains those matches; `omega` can't evaluate a `match`, so
+    we add `simp` (which reduces the `match` on a constructor literal after the
+    relevant `cases`/`by_cases` has fixed the binder) before the arithmetic.
+    `hasPhase` toggles that in. -/
+def decreasingByFor (measure : Measure) (hasPhase : Bool := false) : String :=
+  let phaseSimp := if hasPhase then "  all_goals (try simp_all)\n" else ""
+  let arith :=
+    match measure with
+    | .sum _   => "  all_goals (first | omega | simp_all [Prod.lex_def] <;> omega)"
+    | .lex _   => "  all_goals (first | simp_all [Prod.lex_def] <;> omega | omega)"
+  "decreasing_by\n  all_goals simp_wf\n" ++ phaseSimp ++ arith
+
 /-- Top-level WF emission. Produces a `def` (not `theorem` — the body
     makes recursive calls) carrying `termination_by` + `decreasing_by`,
-    with the measure synthesised by the caller via `SCGraph.synthMeasure`. -/
+    with the measure synthesised by the caller via `SCGraph.synthMeasure`.
+    The `decreasing_by` block is chosen by the measure's shape — see
+    `decreasingByFor`. -/
 def translate (defaultSimpPred : Option String) (goalType thmName : String)
     (varSorts : List (String × SortInfo)) (measure : Measure)
-    (t : ProofTree) : String :=
+    (t : ProofTree) (phaseRanks : PhaseRanks := []) : String :=
   let ctx : WFCtx :=
     { thmName := thmName
       varSorts := varSorts
@@ -217,7 +289,7 @@ def translate (defaultSimpPred : Option String) (goalType thmName : String)
   let header := "def " ++ thmName ++ " " ++ String.intercalate " " bindings
                   ++ " : " ++ goalType ++ " := by"
   let body := emitTree ctx 1 t
-  let measRHS := measureToTerminationRHS varSorts measure
+  let measRHS := measureToTerminationRHS varSorts measure phaseRanks
   -- NB: emit `termination_by <measure>` WITHOUT rebinding the parameters.
   -- For a tactic-style (`:= by`) recursive def, the `xs ys => …` rebind form
   -- raises "N parameters bound in `termination_by`, but the body only binds 0
@@ -226,8 +298,27 @@ def translate (defaultSimpPred : Option String) (goalType thmName : String)
   let _ := binderNames
   header ++ "\n" ++ body ++ "\n"
     ++ "termination_by " ++ measRHS ++ "\n"
-    ++ "decreasing_by\n"
-    ++ "  all_goals simp_wf\n"
-    ++ "  all_goals omega"
+    ++ decreasingByFor measure (hasPhase := !phaseRanks.isEmpty)
+
+/-- Emit the SAME `def` body but with NO `termination_by` / `decreasing_by`,
+    letting Lean's own structural / `GuessLex` termination inference find a
+    measure. Used as an additive fallback rung: when our synthesised-measure
+    emission fails to commit, this catches the cases Lean can infer on its own
+    (verified: `merge_length` terminates with no clause at all — Lean infers
+    the lexicographic measure and discharges it). It never HIDES synthesis:
+    the dispatcher tries the explicit-measure script first (so the synthesised
+    measure stays the visible artifact when it works) and only falls here when
+    that fails — strictly more proofs go through, none regress. -/
+def translateNoMeasure (defaultSimpPred : Option String) (goalType thmName : String)
+    (varSorts : List (String × SortInfo)) (t : ProofTree) : String :=
+  let ctx : WFCtx :=
+    { thmName := thmName
+      varSorts := varSorts
+      defaultSimpPred := defaultSimpPred }
+  let bindings := varSorts.map fun (v, si) => "(" ++ v ++ " : " ++ si.typeStr ++ ")"
+  let header := "def " ++ thmName ++ " " ++ String.intercalate " " bindings
+                  ++ " : " ++ goalType ++ " := by"
+  let body := emitTree ctx 1 t
+  header ++ "\n" ++ body
 
 end CyclicTactic.WFEmit

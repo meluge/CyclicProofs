@@ -106,6 +106,89 @@ the tree via \code{emitTree}, then assembles the result into a
 \code{theorem <name> <binders> : <goalType> := by <body>} string ready to
 hand to \code{Lean.Parser.runParserCategory}.
 
+\subsection{Well-founded emission and phase-aware extraction}
+\label{sec:impl-wf}
+
+The structural §6 emitter of §\ref{sec:impl-emission} applies only when a
+single \code{induction} carries the whole recursion. When the dispatch
+predicate \code{canStructural} (§\ref{sec:dispatch}) returns
+\code{false}---merge-sort, the argument-swap of Cyclist's Test~14, the
+2-Hydra of Test~15---the system instead routes the proof to the well-founded
+backend in \file{CyclicTactic/WFEmit.lean}.
+
+\paragraph{The WF emitter.}
+\code{WFEmit.translate} emits a recursive \code{def} (not a \code{theorem}:
+the body makes genuine recursive calls) carrying a
+\code{termination\_by <measure>} clause and a \code{decreasing\_by} discharge.
+The measure is synthesised by \code{synthMeasure}
+(\file{CyclicTactic/Measure.lean}, §\ref{sec:dispatch}) as a \code{Measure}
+value---either \code{lex order} or \code{sum arity}---and rendered over the
+actual binder names (\code{(xs.length, ys.length)}, \code{x + y}). The
+\code{decreasing\_by} tactic is chosen \emph{from the \code{Measure}
+constructor} by \code{WFEmit.decreasingByFor}, not by a fixed script: a
+\code{sum} measure discharges with \code{simp\_wf; omega}, a \code{lex} measure
+with \code{simp [Prod.lex\_def]} followed by \code{omega} for the residual
+arithmetic (a plain \code{omega} chokes on the propositional shape of the
+\code{Prod.Lex} goal). The emitted \code{def} is committed by the same
+canonical-form replacement as the §6 path (§\ref{sec:impl-emission}): the
+environment is rolled back, the \code{def} re-elaborated, and the result kept
+only if its value is \code{sorry}-free---so a measure Lean's kernel rejects
+falls back to the recursive form rather than committing an unsound proof.
+
+\paragraph{Phase-aware extraction.}
+A \emph{finite-domain} argument---one whose value is a nullary constructor of
+a finite type such as \code{Bool} or a user enum---can carry well-founded
+progress that the structural size-change extractor misses. When a cyclic proof
+drives such an argument through a fixed constructor order (the Sprenger-Dam
+two-step's \(\code{true} \to \code{false} \to \code{true}\) phase, Cyclist
+Test~13), the structural comparison sees only ``two distinct nullary
+constructors,'' emits no size-change edge, and the position looks like
+stagnation. The proof then fails the SCT gate \emph{before} emission: no
+lexicographic or sum measure over the remaining inductive arguments can
+witness a back-edge on which only the phase has progressed.
+
+\file{CyclicTactic/Phase.lean} recovers this progress as a pre-pass on the
+labelled size-change graphs, run once before the SCT check. The phase order is
+\emph{derived from the proof, not guessed}:
+
+\begin{enumerate}
+  \item \textbf{Capture.} \code{extractPhaseTrans} walks the tree in parallel
+    with the size-change extractor and records, per back-edge, each diagonal
+    finite-domain transition \((\code{pos}, \code{src}, \code{dst})\) whose
+    ancestor and bud arguments at \code{pos} are distinct nullary
+    constructors.
+  \item \textbf{Constrain.} A back-edge whose size-change graph has \emph{no}
+    structural strict self-loop is \emph{stalled}: to be sound it must progress
+    in a phase, so its transition \(\code{src} \to \code{dst}\) is
+    \emph{required} to strictly decrease (\(\code{src} > \code{dst}\)).
+  \item \textbf{Solve.} \code{rankConstructors} ranks each position's
+    constructors by a topological peel of these requirements. If they are
+    cyclic---a genuinely non-terminating phase cycle such as
+    \(\code{false} \to \code{true} \to \code{false}\) with progress nowhere
+    else---the position is left unsolved and the proof is correctly rejected.
+  \item \textbf{Patch.} \code{phaseAugment} adds a strict self-loop to every
+    back-edge whose transition strictly decreases under the solved order; an
+    increasing transition contributes nothing, since the structural descent
+    must carry it.
+  \item \textbf{Render.} The phase position's measure component becomes a total
+    \code{match} over the type's constructors---e.g.\
+    \code{match b with | true => 1 | false => 0}---each solved constructor
+    taking its rank and the rest zero, emitted with fully-qualified
+    constructor names so that a bare lowercase enum case is not mis-parsed as a
+    catch-all variable pattern.
+\end{enumerate}
+
+Augmentation only ever \emph{adds} a strict self-loop, so it can only turn a
+previously un-emittable proof into a WF-emittable one; it never reroutes a
+proof away from the structural emitter, because \code{canStructural} and the
+induction-order finder consult the raw, un-augmented graphs. Soundness is again
+by the kernel re-check---the pass only \emph{proposes} a measure, and an
+over-eager phase order yields a \code{def} Lean rejects, never a wrong proof.
+The two phase examples, \code{ph\_total} (a \code{Bool} phase) and
+\code{q\_total} (a three-state enum whose order \(a < b < c\) is solved from
+two stalled back-edges), emit kernel-clean lexicographic measures
+\((n, \code{phaseRank})\) (§\ref{sec:evaluation}).
+
 \subsection{Sort metadata and dependent binders}
 
 The emitter needs to know each binder's inductive type to emit the right
@@ -192,7 +275,7 @@ blocks with within-entry cycles are not yet supported.
 
 \subsection{Module layout}
 
-The implementation totals approximately 5\,400 lines of Lean code across
+The implementation totals approximately 5\,900 lines of Lean code across
 the following modules:
 
 \begin{center}
@@ -210,11 +293,13 @@ the following modules:
   \file{PaperAnnotation.lean} & 811 \\
   \file{Theorem6.lean} & 755 \\
   \file{EmitCommon.lean} & 155 \\
+  \file{WFEmit.lean} & 324 \\
+  \file{Phase.lean} & 208 \\
   \file{Tactic.lean} & 897 \\
   \file{Build.lean} & 372 \\
   \file{Design.lean} & 448 \\
   \midrule
-  Total & 5\,383 \\
+  Total & 5\,915 \\
   \bottomrule
 \end{tabular}
 \end{center}

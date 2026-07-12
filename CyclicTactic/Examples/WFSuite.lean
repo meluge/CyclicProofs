@@ -105,4 +105,104 @@ cyclic_thm hyd_total (x y : Nat) : Hyd x y by
 
 example (x y : Nat) : Hyd x y := hyd_total x y
 
+/-! ## Test 13 — Sprenger–Dam two-step descent via a PHASE argument
+
+Cyclist benchmark Test 13 (R/R2). A two-phase predicate: `flip` moves the
+`Bool` phase `true ⟶ false` with `n` PRESERVED; `down` moves `false ⟶ true`
+while shrinking `n`. The cycle alternates phases, and the only progress on the
+`flip` step lives in the phase, not in `n` — so NO size-change on the inductive
+argument `n` decreases on every back-edge, and the structural extractor sees
+the `Bool` transition as stagnation. This is the case that fails the plain SCT
+gate (GAP1-FINDINGS tier T2).
+
+GAP-2 PHASE-AWARE EXTRACTION handles it: the `flip` back-edge is "stalled"
+(no structural strict descent), so its phase transition `true ⟶ false` is
+*required* strict, forcing the order `true > false`; `down`'s phase transition
+is then a (free) increase covered by `n`'s structural descent. The solver finds
+this order is consistent (acyclic), patches a strict self-loop at the phase
+position, and the synthesised measure becomes lex `(n, phaseRank b)` with
+`phaseRank` rendered as `match b with | true => 1 | false => 0`. Emits a
+kernel-clean `def … termination_by (n, match b with …)`. A genuinely
+non-terminating phase cycle (progress nowhere) would make the order cyclic and
+be correctly REJECTED (→ recursive fallback), so the augmentation is sound. -/
+
+inductive Ph : Nat → Bool → Prop where
+  | base : Ph 0 true
+  | flip (n : Nat)  : Ph n true  → Ph n false
+  | down (n : Nat)  : Ph n false → Ph (Nat.succ n) true
+
+cyclic_thm ph_total (n : Nat) (b : Bool) : Ph n b by
+  cyclic R
+  cyc_cases b with
+  | false =>
+    apply Ph.flip n
+    back R {n := n, b := true}
+  | true =>
+    cyc_cases n with
+    | zero => exact Ph.base
+    | succ n' =>
+      apply Ph.down n'
+      back R {n := n', b := false}
+
+example (n : Nat) (b : Bool) : Ph n b := ph_total n b
+
+/-! ## Test 13b — three-state phase: a `>` b `>` c order solved from TWO stalled edges
+
+`ph_total` exercises the phase mechanism only in its easy corner: a 2-element
+phase (`Bool`), a single stalled back-edge, and a trivial 2-element order. The
+parts of the GAP-2 machinery that a 2-state phase never touches are:
+
+* `rankConstructors` building a topological chain LONGER than 2;
+* the emitter rendering a `match` over THREE-plus constructors;
+* MULTIPLE stalled-edge constraints composing into one consistent order.
+
+This example stresses exactly those. The phase domain `Tri` has three nullary
+constructors and the cycle runs `a ⟶ c ⟶ b ⟶ a`, with the strict `Nat`
+descent living ONLY on the `a`-step (`to_a : Q n c → Q (succ n) a`). The other
+two steps preserve `n`, so their back-edges are *stalled*:
+
+* `b`-arm: `Q n b` ← `Q n a`  — back-edge `(n,b) ⟶ (n,a)`, `n` preserved ⇒
+  STALLED ⇒ phase `b ⟶ a` required strict ⇒ `b > a`;
+* `c`-arm: `Q n c` ← `Q n b`  — back-edge `(n,c) ⟶ (n,b)`, `n` preserved ⇒
+  STALLED ⇒ phase `c ⟶ b` required strict ⇒ `c > b`;
+* `a`-arm (`succ`): `Q (succ n') a` ← `Q n' c` — `n` STRICT, not stalled; the
+  phase `a ⟶ c` is a free increase carried by the `n` descent.
+
+The solver composes `{b > a, c > b}` into the chain `a < b < c` (ranks
+`a:0, b:1, c:2`) and patches a strict self-loop on the phase position of both
+stalled edges. Measure becomes lex `(n, phaseRank t)` with `phaseRank` rendered
+as `match t with | Tri.a => 0 | Tri.b => 1 | Tri.c => 2`. Unlike `ph_total`,
+this also checks that `buildSortInfo` enumerates a *user-defined* enum's
+constructors (not just built-in `Bool`) and that the emitter renders the match
+patterns with FULLY-QUALIFIED ctor names (a bare lowercase `a` would parse as a
+catch-all variable, silently swallowing the match). -/
+
+inductive Tri where | a | b | c
+
+inductive Q : Nat → Tri → Prop where
+  | base                : Q 0 Tri.a
+  | to_b (n : Nat)      : Q n Tri.a → Q n Tri.b
+  | to_c (n : Nat)      : Q n Tri.b → Q n Tri.c
+  | to_a (n : Nat)      : Q n Tri.c → Q (Nat.succ n) Tri.a
+
+-- Arms with NO nested split (`b`, `c`) come first; the arm WITH the nested
+-- `cyc_cases n` (`a`) comes LAST (same event-recorder constraint as `hyd_total`).
+cyclic_thm q_total (n : Nat) (t : Tri) : Q n t by
+  cyclic R
+  cyc_cases t with
+  | b =>
+    apply Q.to_b n
+    back R {n := n, t := Tri.a}
+  | c =>
+    apply Q.to_c n
+    back R {n := n, t := Tri.b}
+  | a =>
+    cyc_cases n with
+    | zero => exact Q.base
+    | succ n' =>
+      apply Q.to_a n'
+      back R {n := n', t := Tri.c}
+
+example (n : Nat) (t : Tri) : Q n t := q_total n t
+
 end WFSuite

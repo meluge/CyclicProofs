@@ -1,6 +1,7 @@
 import Lean
 import CyclicTactic.ProofTree
 import CyclicTactic.SizeChange
+import CyclicTactic.Phase
 import CyclicTactic.InductionOrder
 import CyclicTactic.PaperAnnotation
 import CyclicTactic.Theorem6
@@ -552,14 +553,34 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
     -- Phase C: run SCT validation (extractTraceSCGsLabeled →
     -- checkMultiSCT → findInductionOrder Wehr 3.2.4) on the tree.
     let labeled := Proof.extractTraceSCGsLabeled tree
-    let graphs := labeled.map (·.2)
+    -- PHASE AUGMENTATION (GAP 2): patch the per-back-edge SCGs with a strict
+    -- self-loop at any finite-domain (Bool/enum) "phase" position whose
+    -- required descent order is consistent (see `Proof.phaseAugment`). This
+    -- must happen BEFORE `checkMultiSCT`/`findInductionOrder`, since a
+    -- phase-only two-step proof (e.g. `f_total`) otherwise fails the SCT gate
+    -- and is filtered out before emission. On a corpus with no phase structure
+    -- `phaseAugment` returns the graphs unchanged and `ranks = []`, so SCT,
+    -- the induction order, and emission are all byte-identical to before — no
+    -- regression. The kernel still re-checks the emitted measure, so the
+    -- augmentation is sound by construction (an over-eager patch is rejected,
+    -- never accepted as a wrong proof). `phaseRanks` flows to WFEmit below.
+    let phaseTrans := Proof.extractPhaseTrans tree
+    let pa := Proof.phaseAugment labeled phaseTrans
+    let labeledRaw := labeled
+    let labeled := labeled.zip pa.graphs |>.map (fun ((l, _), g) => (l, g))
+    let phaseRanks := pa.ranks
+    let graphs := pa.graphs
     let rootSeq := tree.sequent
     let arity : Nat :=
       let ns := rootSeq.antecedents.map (·.args.length) ++
                 rootSeq.succedents.map (·.args.length)
       ns.foldl (· + ·) 0
     let sctOk := SCGraph.checkMultiSCT graphs
-    let order := InductionOrder.findInductionOrder tree labeled arity
+    -- Induction order / `canStructural` use the RAW (un-augmented) graphs: a
+    -- phase self-loop must NOT make a proof look structurally-recursive and get
+    -- routed to the §6 structural emitter (which can't render a phase rank).
+    -- Phase augmentation only ever ADDS WF-emittable proofs, never reroutes.
+    let order := InductionOrder.findInductionOrder tree labeledRaw arity
     let sctMsg := if sctOk then "PASS ✓" else "FAIL ✗"
     let orderMsg : String := match order with
       | some asg =>
@@ -632,7 +653,7 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
       -- branch logs a textually-DISTINCT marker (chosen / committed ✓ /
       -- FALLBACK) so a fresh compile proves which path produced <name> —
       -- a green build alone is NOT proof of WF emission.
-      let useStructural := canStructural tree labeled arity
+      let useStructural := canStructural tree labeledRaw arity
       -- Shared committer: parse `script`, roll env back to `envBefore`,
       -- drop the scaffold's diagnostics, elaborate, and report whether a
       -- sorry-free value was committed (restoring the recursive form +
@@ -687,11 +708,38 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
           Lean.logWarningAt name m!"[cyclic_thm {name.getId}] structural emission failed; keeping recursive form (FALLBACK)."
       else
         -- WF path: synthesise a lex/sum measure from the per-back-edge
-        -- size-change graphs and emit `termination_by … decreasing_by`.
-        let gs := Proof.extractTraceSCGs tree
+        -- size-change graphs and emit `termination_by <measure> decreasing_by`
+        -- with a measure-typed `decreasing_by` (see WFEmit.decreasingByFor).
+        --
+        -- Emission ladder (each rung strictly more permissive; the explicit
+        -- synthesised measure stays the VISIBLE artifact when it works, so
+        -- nothing hides the SCT→measure contribution):
+        --   1. `synthMeasure` → emit `def … termination_by <measure>`.
+        --   2. on failure, emit the SAME body with NO clause and let Lean's
+        --      own structural/GuessLex inference find a measure (catches e.g.
+        --      `merge_length`, which Lean infers unaided).
+        --   3. on failure, keep the user's recursive form (existing fallback).
+        -- `gs` (phase-augmented SCGs) and `phaseRanks` were computed up top
+        -- (Phase C) so SCT, the induction order, and emission all agree.
+        let gs := graphs
+        -- Body-only script for rung 2 — shared by both the `some` and `none`
+        -- measure cases.
+        let inferScript := CyclicTactic.WFEmit.translateNoMeasure
+          (defaultSimpPred := st.goalHeadName)
+          (goalType := goalTypeStr)
+          (thmName := name.getId.toString)
+          (varSorts := varSorts)
+          tree
+        let tryInferThenFallback : String → Lean.Elab.Command.CommandElabM Unit :=
+          fun reason => do
+            if ← tryCommit inferScript then
+              Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: WF emission ✓ (Lean-inferred measure); dispatcher chose WF: {reason}"
+            else
+              Lean.logWarningAt name m!"[cyclic_thm {name.getId}] WF emission failed (synthesised measure AND Lean inference); keeping recursive form (FALLBACK)."
         match synthMeasure gs arity with
         | some measure =>
-          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] dispatcher chose WF: findInductionOrder has no single-variable order; measure = {measure}"
+          let phaseNote := if phaseRanks.isEmpty then "" else s!" [phase-augmented: {phaseRanks.length} finite-domain position(s)]"
+          Lean.logInfoAt name m!"[cyclic_thm {name.getId}] dispatcher chose WF: findInductionOrder has no single-variable order; measure = {measure}{phaseNote}"
           let script := CyclicTactic.WFEmit.translate
             (defaultSimpPred := st.goalHeadName)
             (goalType := goalTypeStr)
@@ -699,6 +747,7 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
             (varSorts := varSorts)
             (measure := measure)
             tree
+            (phaseRanks := phaseRanks)
           Lean.logInfoAt name m!"[cyclic_thm {name.getId}] WF emitted script:\n{script}"
           if ← tryCommit script then
             -- Re-state the measure HERE: `tryCommit` resets the message log on
@@ -706,11 +755,12 @@ def elabCyclicThm : Lean.Elab.Command.CommandElab := fun stx => do
             -- synthesised measure is the paper's evidence base, so it must
             -- survive a successful emission. (`measure` prints as e.g.
             -- `lex (a0, a1)` or `sum 2`.)
-            Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: WF emission ✓ (termination_by); dispatcher chose WF: no single-variable induction order; measure = {measure}"
+            let phaseNote := if phaseRanks.isEmpty then "" else s!"; phase-augmented ({phaseRanks.length} finite-domain pos)"
+            Lean.logInfoAt name m!"[cyclic_thm {name.getId}] canonical form: WF emission ✓ (termination_by); dispatcher chose WF: no single-variable induction order; measure = {measure}{phaseNote}"
           else
-            Lean.logWarningAt name m!"[cyclic_thm {name.getId}] WF emission failed; keeping recursive form (FALLBACK)."
+            tryInferThenFallback s!"synthesised measure {measure} did not discharge; tried Lean inference"
         | none =>
-          Lean.logWarningAt name m!"[cyclic_thm {name.getId}] dispatcher: no structural order and no synthesisable measure; keeping recursive form (FALLBACK)."
+          tryInferThenFallback "no synthesisable lex/sum measure; tried Lean inference"
     setCurrentThm none
   | _ => Lean.throwError "cyclic_thm: malformed syntax"
 

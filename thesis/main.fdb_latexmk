@@ -1,13 +1,13 @@
 # Fdb version 4
-["bibtex main"] 1780313776.5342 "main.aux" "main.bbl" "main" 1780313778.28385 0
+["bibtex main"] 1782479746.12317 "main.aux" "main.bbl" "main" 1782479747.85191 0
   "./bibliography.bib" 1780307933.32972 2657 3fd41091b2f6f33a0ac9a9991b076133 ""
   "/usr/local/texlive/2026/texmf-dist/bibtex/bst/base/plain.bst" 1292289607 20613 bd3fbfa9f64872b81ac57a0dd2ed855f ""
-  "main.aux" 1780313777.89972 10715 20e1d20feab1ccbbe391025bd60a7f70 "lualatex"
+  "main.aux" 1782479747.47099 10715 20e1d20feab1ccbbe391025bd60a7f70 "lualatex"
   (generated)
   "main.bbl"
   "main.blg"
   (rewritten before read)
-["lualatex"] 1780313776.62911 "main.tex" "main.pdf" "main" 1780313778.28417 0
+["lualatex"] 1782479746.2152 "main.tex" "main.pdf" "main" 1782479747.85226 0
   "/usr/local/texlive/2026/texmf-dist/fonts/tfm/adobe/symbol/psyr.tfm" 1136768653 1408 5937f58aa508ea2cea4901c07d10f5fe ""
   "/usr/local/texlive/2026/texmf-dist/fonts/tfm/adobe/zapfding/pzdr.tfm" 1136768653 1528 f853c4d1b4e0550255e02831fdc8496f ""
   "/usr/local/texlive/2026/texmf-dist/fonts/tfm/public/amsfonts/symbols/msam10.tfm" 1246382020 916 f87d7c45f9c908e672703b83b72241a3 ""
@@ -216,7 +216,7 @@
   "/usr/local/texlive/2026/texmf-dist/tex/luatex/luaotfload/luaotfload-unicode.lua" 1740687098 7918 4272855a25780b80472f3b58edd95e33 ""
   "/usr/local/texlive/2026/texmf-dist/tex/luatex/luaotfload/luaotfload.lua" 1740687098 13566 16df94dd2de231b2bca0aaa0190941fe ""
   "/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1780207289 5573038 ad3e0d8c63dbec7957113a2386d66888 ""
-  "/usr/local/texlive/2026/texmf-var/luatex-cache/generic/fonts/otl/lmroman10-regular.luc" 1780313775.21973 127327 bb05cc850edf5447a76a9cb72263daaf ""
+  "/usr/local/texlive/2026/texmf-var/luatex-cache/generic/fonts/otl/lmroman10-regular.luc" 1782479742.891 127327 bb05cc850edf5447a76a9cb72263daaf ""
   "/usr/local/texlive/2026/texmf-var/luatex-cache/generic/names/luaotfload-names.luc.gz" 1780207440 348138 d9440fa62a0c2a0c78a9747d87ca6b03 ""
   "/usr/local/texlive/2026/texmf-var/web2c/luahbtex/lualatex.fmt" 1780207368 5679453 2907121372b8281c1c3b5cda5cc74ff1 ""
   "chapters/01-introduction.tex" 1780307662.88264 5844 09f2d0814eeb8819cc99908218f89a33 ""
@@ -225,11 +225,11 @@
   "chapters/04-implementation.tex" 1780307810.85814 9588 50dd15697b9f9893a8fa45e9d24059f3 ""
   "chapters/05-evaluation.tex" 1780309478.15241 5354 160aad223e09cd7db8ebe77d2f56fc7d ""
   "chapters/06-limitations-and-future.tex" 1780313549.10044 15223 9a26867c586ee0a3ca4134a2d3f0378a ""
-  "main.aux" 1780313777.89972 10715 20e1d20feab1ccbbe391025bd60a7f70 "lualatex"
-  "main.bbl" 1780313776.61572 2022 38eb18cf008b2fa2262a20c2395d5bcc "bibtex main"
-  "main.out" 1780313777.89972 5978 736e454a8c00ad6b2003bd30a9d5eb85 "lualatex"
+  "main.aux" 1782479747.47099 10715 20e1d20feab1ccbbe391025bd60a7f70 "lualatex"
+  "main.bbl" 1782479746.20299 2022 38eb18cf008b2fa2262a20c2395d5bcc "bibtex main"
+  "main.out" 1782479747.47099 5978 736e454a8c00ad6b2003bd30a9d5eb85 "lualatex"
   "main.tex" 1780307601.38685 1794 b297d072b73468a79753d3e0e739a32c ""
-  "main.toc" 1780313777.89972 4636 0a863ef1f132724475ce0e58f30f92c5 "lualatex"
+  "main.toc" 1782479747.47099 4636 0a863ef1f132724475ce0e58f30f92c5 "lualatex"
   "preamble.tex" 1780313437.59679 3434 1c979543eee882d807a91f7fb8cc384b ""
   (generated)
   "main.aux"

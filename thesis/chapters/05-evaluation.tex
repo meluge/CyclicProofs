@@ -10,20 +10,25 @@ of the §6 path.
 
 \subsection{Worked-example suite}
 
-The repository contains 18 \code{cyclic\_thm} and \code{cyclic\_mutual}
-declarations distributed across five example files. All 18 elaborate via the
-canonical §6 path (the \texttt{[cyclic\_thm <name>] canonical form: Theorem
-6.1 emission ✓} diagnostic fires for each). The breakdown is:
+The repository contains 22 single-theorem \code{cyclic\_thm} declarations and
+one \code{cyclic\_mutual} block, distributed across seven buildable example
+files. Seventeen elaborate via the canonical structural §6 path (the
+\texttt{[cyclic\_thm <name>] Theorem 6.1 emission ✓} diagnostic fires for each
+of the seventeen); five route through the well-founded backend
+(§\ref{sec:impl-wf}), two of those via phase-aware extraction; and one is the
+mutual block. The breakdown is:
 
 \begin{center}
 \begin{tabular}{lrl}
   \toprule
   File & Count & Coverage \\
   \midrule
-  \file{Smoke.lean} & 3 & basic Nat induction, single back-edge \\
-  \file{Probe.lean} & 5 & multi-arg, branches, \(\exists\)-witness, \texttt{have} \\
-  \file{Probe2.lean} & 5 & enums, lists, nested back-edge \\
-  \file{drp.lean} & 4 & comparison with the Cyclic DSL baseline \\
+  \file{Smoke.lean} & 3 & basic Nat induction, single back-edge (structural §6) \\
+  \file{Probe.lean} & 5 & multi-arg, branches, \(\exists\)-witness, \texttt{have} (§6) \\
+  \file{Probe2.lean} & 5 & enums, lists, nested back-edge (structural §6) \\
+  \file{drp.lean} & 4 & comparison with the Cyclic DSL baseline (§6) \\
+  \file{MergeSort.lean} & 1 & non-structural merge; WF lex \((\code{xs.length}, \code{ys.length})\) \\
+  \file{WFSuite.lean} & 4 & WF backend: sum (swap), lex + growing edge, 2 phase-augmented \\
   \file{MutualSmoke.lean} & 1 & mutual block (Od/Ev) \\
   \bottomrule
 \end{tabular}
@@ -34,7 +39,11 @@ splits (e.g., \code{zeroAddT}, \code{addCommT}), multi-recursive branches
 (\code{btPredT}), nested case-splits with lex descent (\code{ackTotal\_cyc}),
 existential witnesses (\code{existsEqT}), intermediate \code{have} steps
 (\code{zeroAddHaveT}), and cross-companion mutual blocks
-(\code{od\_is\_nlike\_cyc} / \code{ev\_is\_nlike\_cyc}).
+(\code{od\_is\_nlike\_cyc} / \code{ev\_is\_nlike\_cyc}). The well-founded
+examples add the non-structural shapes: the argument-swap \code{n2\_holds}
+(sum measure), the growing-edge \code{hyd\_total} (lexicographic), and the
+finite-domain phase descents \code{ph\_total} and \code{q\_total}
+(§\ref{sec:impl-wf}).
 
 \subsection{Cyclist first-order benchmark}
 
@@ -57,6 +66,9 @@ Table~\ref{tbl:cyclist}.
     09 & \(\mathit{ADD}(x,y,z) \vdash \mathit{ADD}(x, sy, sz)\) & ✓ & ✓ \\
     10 & associativity of \(\mathit{ADD}\) & ✗ & ✓ \\
     11 & commutativity of \(\mathit{ADD}\) & ✗ & ✓ \\
+    13 & two-step descent (R/R2, \code{Bool} phase) & ✓ & ✓ (WF, phase-aware) \\
+    14 & \(N(x) \wedge N(y) \vdash N2(x,y)\) (swap) & ✓ & ✓ (WF, sum) \\
+    15 & 2-Hydra totality & ✓ & ✓ (WF, lex) \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -69,13 +81,21 @@ algebraically. Our system, hosted on Lean, decouples the cyclic structure
 reasoning (closed by Lean tactics), so \texttt{congrArg Nat.succ} plus
 \texttt{rw} discharges the algebraic step inside each arm.
 
-Tests 02, 04, 12, 13, 14, 15 are not ported in the current system. Tests
-02 and 04 require introducing an induction hypothesis as a hypothesis and
-case-splitting on its disjunctive result---our \code{back} primitive consumes
-the goal directly via \code{exact}, so this pattern is not expressible
-within the current tactic surface. Tests 12, 13, 15 require well-founded
-emission with an explicit measure (Sprenger-Dam two-step descent, R/R2
-lex, 2-Hydra)---our current §6 emitter is structural-only.
+Tests 13, 14, and 15 now go through the well-founded backend
+(§\ref{sec:impl-wf}). Test 14 (\(N2\), an argument-swapping recursion) emits
+with the synthesised sum measure \(x+y\); Test 15 (2-Hydra) with the
+lexicographic measure \((x,y)\) over a back-edge that \emph{grows} the second
+argument; and Test 13 (the Sprenger-Dam two-step, whose only progress on the
+\code{flip} step lives in a \code{Bool} phase) emits via phase-aware extraction
+(§\ref{sec:impl-wf}) as the lexicographic measure \((n, \code{phaseRank}\,b)\).
+Tests 02 and 04 remain unported: they require introducing an induction
+hypothesis as a hypothesis and case-splitting on its disjunctive result---our
+\code{back} primitive consumes the goal directly via \code{exact}, so this
+pattern is not expressible within the current tactic surface. Test 12's exact
+\(R\) sequent is not among the \texttt{.tst} files checked into this
+repository, so we do not claim the literal benchmark; the two-step descent it
+represents is the one Test 13 exercises, generalised to a three-state enum
+phase by \code{q\_total}.
 
 \subsection{Comparison with the deleted Unravel emitter}
 
